@@ -21,7 +21,7 @@ fitur berbayar, atau Web UI. Operator memakai `temporal` CLI dengan sertifikat o
 | PKI internal | CA server Temporal, CA broker, dan **client CA khusus Temporal** (kunci offline; lihat §4a) |
 
 Tidak ada kredensial tulis Alibaba di mana pun. Broker dan worker menolak start bila `ALIBABA_CLOUD_ACCESS_KEY_*`,
-`ALICLOUD_*` atau `DECA_SOAR_ACTOR_ROLE_ARN` ada di env. Worker juga menolak start bila memegang URL DB atau key vault.
+`ALICLOUD_*` atau `HYPERSOAR_ACTOR_ROLE_ARN` ada di env. Worker juga menolak start bila memegang URL DB atau key vault.
 
 ## 1. Binary Temporal
 ```sh
@@ -42,7 +42,7 @@ CREATE DATABASE temporal OWNER temporal;  CREATE DATABASE temporal_visibility OW
 CREATE ROLE deca_owner LOGIN CREATEROLE PASSWORD '<…>';         -- hanya untuk job owner, DSN di vault ops
 CREATE DATABASE deca_soar OWNER deca_owner;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;   -- (di DB deca_soar) default PG ≥ 15; PG lebih lama wajib, kalau tidak app menolak start
--- setelah `deca-soar migrate` pertama membuat group role NOLOGIN:
+-- setelah `hypersoar migrate` pertama membuat group role NOLOGIN:
 CREATE ROLE deca_gw   LOGIN PASSWORD '<…>' IN ROLE deca_soar_gateway;
 CREATE ROLE deca_brk  LOGIN PASSWORD '<…>' IN ROLE deca_soar_broker;
 CREATE ROLE deca_aud  LOGIN PASSWORD '<…>' IN ROLE deca_soar_auditor;
@@ -128,10 +128,10 @@ Yang tidak bisa dicek dari host: jumlah sertifikat yang pernah diterbitkan (regi
 ```sh
 # Base image dipin digest (N3): isi digest yang di-pull/di-scan, lalu build. Build berhenti bila masih placeholder.
 docker pull python:3.12-slim-bookworm && docker inspect --format '{{index .RepoDigests 0}}' python:3.12-slim-bookworm
-sudo install -m 0600 /dev/null /etc/deca-soar/deca.env   # DECA_BASE_IMAGE=python:3.12-slim-bookworm@sha256:<64 hex>,
-                                                         # DECA_SOAR_IMAGE, DECA_BIND_IP, DECA_TEMPORAL_ADDRESS,
-                                                         # DECA_BROKER_URL=https://…:8100, DECA_POLICY_HOST_DIR, DECA_REPLAY_DIR
-docker build -f deploy/deca/Dockerfile --build-arg BASE_IMAGE=<DECA_BASE_IMAGE> -t deca-soar:$(git rev-parse --short HEAD) .
+sudo install -m 0600 /dev/null /etc/deca-soar/deca.env   # HYPERSOAR_BASE_IMAGE=python:3.12-slim-bookworm@sha256:<64 hex>,
+                                                         # HYPERSOAR_IMAGE, HYPERSOAR_BIND_IP, HYPERSOAR_TEMPORAL_ADDRESS,
+                                                         # HYPERSOAR_BROKER_URL=https://…:8100, HYPERSOAR_POLICY_HOST_DIR, HYPERSOAR_REPLAY_DIR
+docker build -f deploy/deca/Dockerfile --build-arg BASE_IMAGE=<HYPERSOAR_BASE_IMAGE> -t hypersoar:$(git rev-parse --short HEAD) .
 #   dependensi Python dari deploy/deca/requirements/*.lock (== + sha256, --require-hashes, wheel saja)
 C="docker compose -f deploy/deca/docker-compose.yml --env-file /etc/deca-soar/deca.env"
 O=deploy/deca/bin/deca-owner-run.sh                      # job owner: DSN dari stdin, file tmpfs 0400, dihapus saat selesai
@@ -159,7 +159,7 @@ sudo cp deploy/deca/systemd/deca-ledger-anchor.* /etc/systemd/system/ && sudo sy
   **rotasi password `deca_owner`** di RDS dan vault ops, dan catat di log insiden. Selama ada sisa, `deca-owner-run.sh`
   menolak jalan (exit 65) dan preflight FAIL (`owner: no leftover owner DSN directory`).
 - `/etc/deca-soar/policy` = salinan `policy/` yang sudah direview; `protected.yaml` harus berisi IP/principal nyata
-  (placeholder RFC5737 dihapus), kalau tidak broker menolak start di `DECA_ENV=production`.
+  (placeholder RFC5737 dihapus), kalau tidak broker menolak start di `HYPERSOAR_ENV=production`.
 - Approver = principal `human` role `approver`; service tidak pernah bisa approve atau kill switch.
 - Fase 0 sumber gateway = replay file. Sumber SLS (RAM `soar-reader`) masuk Fase 1.
 - Alur: gateway (inbox + tokenisasi) → start workflow `alert-<id>` → worker: triage (mock) → `POST /v1/actions/requests`
@@ -177,7 +177,7 @@ sudo cp deploy/deca/systemd/deca-ledger-anchor.* /etc/systemd/system/ && sudo sy
   aplikasi SOAR tidak punya akses ke project audit. Admin project = tim security, bukan ops ECS.
 - Cek independen (dari bastion/mesin security, bukan dari ECS yang dicurigai): ekspor logstore `ledger-anchor`
   (JSON / JSON lines; tiap item memakai field `content` = baris asli) lalu
-  `deca-soar verify-ledger --anchors sls-export:<file-ekspor>` dengan DSN auditor → `ok: true`. Kalau ekspor kosong,
+  `hypersoar verify-ledger --anchors sls-export:<file-ekspor>` dengan DSN auditor → `ok: true`. Kalau ekspor kosong,
   verify gagal ("no anchored head"). Format ekspor SLS asli belum dicocokkan; sesuaikan reader bila beda.
 - Root di ECS bisa menulis ulang ledger **dan** file anchor lokal; jendela yang belum ter-anchor ≤ 1 jam + jeda Logtail.
 
@@ -186,7 +186,7 @@ sudo cp deploy/deca/systemd/deca-ledger-anchor.* /etc/systemd/system/ && sudo sy
 2. `temporal operator cluster health` dengan sertifikat operator → `SERVING`; tanpa sertifikat → ditolak TLS.
 3. Taruh 1 alert sintetis di `alerts.ndjson` → `temporal workflow describe -w alert-<id> -n deca-soar` = `COMPLETED`
    → `GET /v1/actions/requests/{id}` = `validated`, `mode=shadow`.
-4. `deca-soar verify-ledger` (role auditor) → `ok: true`; `systemctl start deca-ledger-anchor` → exit 0; dalam beberapa
+4. `hypersoar verify-ledger` (role auditor) → `ok: true`; `systemctl start deca-ledger-anchor` → exit 0; dalam beberapa
    menit baris anchor muncul di logstore SLS `ledger-anchor`, lalu `verify-ledger --anchors sls-export:<ekspor>` → `ok`.
 5. `temporal workflow show -w alert-<id>` hanya menampilkan payload `binary/encrypted`, bukan IP/email.
 6. `ss -ltnp` di ECS: Temporal hanya 7233/7234/7235/7239/6933–6939, **tidak ada 7243**; `ls /etc/deca-soar/secrets`
@@ -194,13 +194,13 @@ sudo cp deploy/deca/systemd/deca-ledger-anchor.* /etc/systemd/system/ && sudo sy
 7. `preflight.py --env … --secrets-dir … --pki-root …` → `0 fail`; simpan output (tanpa secret) di bukti deploy.
 
 ## 7. Rollback
-- Worker/gateway/broker: deploy image sha sebelumnya (`DECA_SOAR_IMAGE`). Workflow yang sedang jalan dilanjutkan
+- Worker/gateway/broker: deploy image sha sebelumnya (`HYPERSOAR_IMAGE`). Workflow yang sedang jalan dilanjutkan
   worker lama selama nama workflow/activity sama; bila tidak kompatibel, kosongkan antrean dulu (`$C stop gateway`,
   tunggu workflow `RUNNING` = 0).
 - Temporal: hentikan `temporal-server`, ganti `TEMPORAL_BIN_DIR` ke versi sebelumnya. Upgrade skema tidak bisa
   di-downgrade, jadi ambil snapshot RDS `temporal*` sebelum upgrade versi server.
 - Migrasi DECA hanya menambah; ledger append-only tidak pernah di-rollback.
-- Darurat: `deca-soar kill-switch on --principal <on-call>` (shadow tetap tercatat, aksi apa pun tidak dieksekusi).
+- Darurat: `hypersoar kill-switch on --principal <on-call>` (shadow tetap tercatat, aksi apa pun tidak dieksekusi).
 
 ## 8. Belum selesai di fase 0
 - Compose/Dockerfile belum pernah dijalankan dengan Docker; digest base image diisi saat build (preflight produksi

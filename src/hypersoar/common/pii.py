@@ -80,7 +80,7 @@ class Tokenizer:
         return any(ip in net for net in self.internal_cidrs)
 
     def token_ip(self, value: str) -> str:
-        """Tokenise an IP unless it belongs to DECA's internal ranges (those are not customer data)."""
+        """Tokenise an IP unless it belongs to the entity's internal ranges (those are not customer data)."""
         ip = canonical_ip(value)
         if self.is_internal_ip(ip):
             return str(ip)

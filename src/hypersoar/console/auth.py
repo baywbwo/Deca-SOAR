@@ -1,7 +1,7 @@
 """Console login: one account, scrypt password hash, server-side sessions, login rate limits.
 
 The password itself never reaches this process's configuration; only `scrypt$N$r$p$salt$hash`
-(from `deca-soar console-hash`, read on stdin) is stored, in a secret file.
+(from `hypersoar console-hash`, read on stdin) is stored, in a secret file.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from deca_soar.common.config import ConfigError
+from hypersoar.common.config import ConfigError
 
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**15, 8, 1
 MAXMEM = 64 * 1024 * 1024

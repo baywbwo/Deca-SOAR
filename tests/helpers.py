@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from deca_soar.gateway.service import pull_once
-from deca_soar.gateway.sources import ReplayFileSource
+from hypersoar.gateway.service import pull_once
+from hypersoar.gateway.sources import ReplayFileSource
 
 
 def write_ndjson(path: Path, rows: list) -> None:

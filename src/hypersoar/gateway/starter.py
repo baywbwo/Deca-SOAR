@@ -10,9 +10,9 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
-from deca_soar.gateway.service import DeliveryError
-from deca_soar.workflows import WORKFLOW_NAME, workflow_id
-from deca_soar.workflows.config import TemporalSettings
+from hypersoar.gateway.service import DeliveryError
+from hypersoar.workflows import WORKFLOW_NAME, workflow_id
+from hypersoar.workflows.config import TemporalSettings
 
 RPC_TIMEOUT = timedelta(seconds=10)
 

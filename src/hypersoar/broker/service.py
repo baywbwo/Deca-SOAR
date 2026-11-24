@@ -10,11 +10,11 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 from psycopg.types.json import Jsonb
 
-from deca_soar import ledger
-from deca_soar.broker import policy
-from deca_soar.broker.catalog import ActionSpec, Protected
-from deca_soar.broker.roles import Principal
-from deca_soar.common.pii import Vault
+from hypersoar import ledger
+from hypersoar.broker import policy
+from hypersoar.broker.catalog import ActionSpec, Protected
+from hypersoar.broker.roles import Principal
+from hypersoar.common.pii import Vault
 
 APPROVAL_TTL = timedelta(minutes=30)
 RATIONALE_MAX = 500

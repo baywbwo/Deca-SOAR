@@ -1,4 +1,4 @@
-# DECA SOAR gateway + Temporal worker + broker (phase 0, shadow-only) on the small ECS of design 12.2 stage 1.
+# HyperSoar gateway + Temporal worker + broker (phase 0, shadow-only) on the small ECS of design 12.2 stage 1.
 # Temporal server runs beside it under systemd (deploy/temporal). Nothing here publishes a public port:
 #   broker  -> https on this ECS's private VPC IP only (security group: this ECS + operator bastion)
 #   gateway -> no inbound port (pull-only); health on loopback inside the container
@@ -11,7 +11,7 @@
 # deploy/deca/bin/deca-owner-run.sh + docker-compose.owner.yml, before `up` (RUNBOOK section 5).
 # Each service also refuses to start if its DB login has more privilege than it needs (review N4).
 x-common: &common
-  image: ${DECA_SOAR_IMAGE:?e.g. deca-soar:<git-sha>}
+  image: ${HYPERSOAR_IMAGE:?e.g. hypersoar:<git-sha>}
   restart: unless-stopped
   read_only: true
   tmpfs: [/tmp]
@@ -23,36 +23,36 @@ x-common: &common
     options: {max-size: 50m, max-file: "5"}
 
 x-env: &env
-  DECA_ENV: production
-  DECA_INTERNAL_CIDRS: ${DECA_INTERNAL_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8,::1/128,fc00::/7,fe80::/10}
+  HYPERSOAR_ENV: production
+  HYPERSOAR_INTERNAL_CIDRS: ${HYPERSOAR_INTERNAL_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8,::1/128,fc00::/7,fe80::/10}
 
 x-temporal-env: &temporal-env
-  DECA_TEMPORAL_ADDRESS: ${DECA_TEMPORAL_ADDRESS:?private-ip:7233 of the Temporal frontend}
-  DECA_TEMPORAL_NAMESPACE: ${DECA_TEMPORAL_NAMESPACE:-deca-soar}
-  DECA_TEMPORAL_TLS_SERVER_NAME: ${DECA_TEMPORAL_TLS_SERVER_NAME:-temporal.deca.internal}
-  DECA_TEMPORAL_TLS_CA_FILE: /run/secrets/temporal_server_ca
-  DECA_TEMPORAL_PAYLOAD_KEY_FILE: /run/secrets/deca_temporal_payload_key
-  DECA_TEMPORAL_PAYLOAD_KEY_ID: ${DECA_TEMPORAL_PAYLOAD_KEY_ID:-k1}
+  HYPERSOAR_TEMPORAL_ADDRESS: ${HYPERSOAR_TEMPORAL_ADDRESS:?private-ip:7233 of the Temporal frontend}
+  HYPERSOAR_TEMPORAL_NAMESPACE: ${HYPERSOAR_TEMPORAL_NAMESPACE:-deca-soar}
+  HYPERSOAR_TEMPORAL_TLS_SERVER_NAME: ${HYPERSOAR_TEMPORAL_TLS_SERVER_NAME:-temporal.deca.internal}
+  HYPERSOAR_TEMPORAL_TLS_CA_FILE: /run/secrets/temporal_server_ca
+  HYPERSOAR_TEMPORAL_PAYLOAD_KEY_FILE: /run/secrets/deca_temporal_payload_key
+  HYPERSOAR_TEMPORAL_PAYLOAD_KEY_ID: ${HYPERSOAR_TEMPORAL_PAYLOAD_KEY_ID:-k1}
 
 services:
   broker:
     <<: *common
-    command: ["uvicorn", "deca_soar.broker.app:app", "--host", "0.0.0.0", "--port", "8100", "--no-server-header",
+    command: ["uvicorn", "hypersoar.broker.app:app", "--host", "0.0.0.0", "--port", "8100", "--no-server-header",
               "--no-access-log", "--ssl-certfile", "/run/secrets/broker_tls_cert",
               "--ssl-keyfile", "/run/secrets/broker_tls_key"]
     environment:
       <<: *env
-      DECA_DB_URL_FILE: /run/secrets/deca_db_url_broker
-      DECA_VAULT_PRIVATE_KEY_FILE: /run/secrets/deca_vault_private_key
-      DECA_VAULT_KEY_ID: ${DECA_VAULT_KEY_ID:-v2}
-      # Reviewed allowlist/catalog for this environment. The broker refuses DECA_ENV=production while the
+      HYPERSOAR_DB_URL_FILE: /run/secrets/deca_db_url_broker
+      HYPERSOAR_VAULT_PRIVATE_KEY_FILE: /run/secrets/deca_vault_private_key
+      HYPERSOAR_VAULT_KEY_ID: ${HYPERSOAR_VAULT_KEY_ID:-v2}
+      # Reviewed allowlist/catalog for this environment. The broker refuses HYPERSOAR_ENV=production while the
       # protected list still holds the repo's RFC5737 placeholders.
-      DECA_POLICY_DIR: /etc/deca-soar/policy
+      HYPERSOAR_POLICY_DIR: /etc/deca-soar/policy
     volumes:
-      - ${DECA_POLICY_HOST_DIR:?reviewed policy dir}:/etc/deca-soar/policy:ro
+      - ${HYPERSOAR_POLICY_HOST_DIR:?reviewed policy dir}:/etc/deca-soar/policy:ro
     secrets: [deca_db_url_broker, deca_vault_private_key, broker_tls_cert, broker_tls_key]
     ports:
-      - "${DECA_BIND_IP:?private VPC IP of this ECS}:8100:8100"
+      - "${HYPERSOAR_BIND_IP:?private VPC IP of this ECS}:8100:8100"
     healthcheck:
       # Loopback liveness only; certificate verification is exercised by the worker's real calls.
       test: ["CMD", "python", "-c", "import ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:8100/healthz',timeout=3,context=ssl._create_unverified_context())"]
@@ -60,34 +60,34 @@ services:
 
   gateway:
     <<: *common
-    command: ["uvicorn", "deca_soar.gateway.app:app", "--host", "127.0.0.1", "--port", "8200", "--no-server-header",
+    command: ["uvicorn", "hypersoar.gateway.app:app", "--host", "127.0.0.1", "--port", "8200", "--no-server-header",
               "--no-access-log"]
     environment:
       <<: [*env, *temporal-env]
-      DECA_DB_URL_FILE: /run/secrets/deca_db_url_gateway
-      DECA_TOKENIZATION_KEY_FILE: /run/secrets/deca_tokenization_key
-      DECA_VAULT_PUBLIC_KEY_FILE: /run/secrets/deca_vault_public_key
-      DECA_VAULT_KEY_ID: ${DECA_VAULT_KEY_ID:-v2}
-      DECA_TEMPORAL_TLS_CERT_FILE: /run/secrets/temporal_gateway_cert
-      DECA_TEMPORAL_TLS_KEY_FILE: /run/secrets/temporal_gateway_key
-      DECA_GATEWAY_SOURCE: ${DECA_GATEWAY_SOURCE:-replay}
-      DECA_REPLAY_FILE: /data/replay/alerts.ndjson
-      DECA_PULL_INTERVAL_S: ${DECA_PULL_INTERVAL_S:-15}
+      HYPERSOAR_DB_URL_FILE: /run/secrets/deca_db_url_gateway
+      HYPERSOAR_TOKENIZATION_KEY_FILE: /run/secrets/deca_tokenization_key
+      HYPERSOAR_VAULT_PUBLIC_KEY_FILE: /run/secrets/deca_vault_public_key
+      HYPERSOAR_VAULT_KEY_ID: ${HYPERSOAR_VAULT_KEY_ID:-v2}
+      HYPERSOAR_TEMPORAL_TLS_CERT_FILE: /run/secrets/temporal_gateway_cert
+      HYPERSOAR_TEMPORAL_TLS_KEY_FILE: /run/secrets/temporal_gateway_key
+      HYPERSOAR_GATEWAY_SOURCE: ${HYPERSOAR_GATEWAY_SOURCE:-replay}
+      HYPERSOAR_REPLAY_FILE: /data/replay/alerts.ndjson
+      HYPERSOAR_PULL_INTERVAL_S: ${HYPERSOAR_PULL_INTERVAL_S:-15}
     secrets: [deca_db_url_gateway, deca_tokenization_key, deca_vault_public_key, deca_temporal_payload_key,
               temporal_server_ca, temporal_gateway_cert, temporal_gateway_key]
     volumes:
-      - ${DECA_REPLAY_DIR:?directory with alerts.ndjson}:/data/replay:ro
+      - ${HYPERSOAR_REPLAY_DIR:?directory with alerts.ndjson}:/data/replay:ro
 
   worker:
     <<: *common
-    command: ["deca-soar", "worker"]
+    command: ["hypersoar", "worker"]
     environment:
       <<: [*env, *temporal-env]
-      DECA_TEMPORAL_TLS_CERT_FILE: /run/secrets/temporal_worker_cert
-      DECA_TEMPORAL_TLS_KEY_FILE: /run/secrets/temporal_worker_key
-      DECA_BROKER_URL: ${DECA_BROKER_URL:?https://<broker private name>:8100}
-      DECA_BROKER_TOKEN_FILE: /run/secrets/deca_broker_worker_token
-      DECA_BROKER_CA_FILE: /run/secrets/broker_tls_ca
+      HYPERSOAR_TEMPORAL_TLS_CERT_FILE: /run/secrets/temporal_worker_cert
+      HYPERSOAR_TEMPORAL_TLS_KEY_FILE: /run/secrets/temporal_worker_key
+      HYPERSOAR_BROKER_URL: ${HYPERSOAR_BROKER_URL:?https://<broker private name>:8100}
+      HYPERSOAR_BROKER_TOKEN_FILE: /run/secrets/deca_broker_worker_token
+      HYPERSOAR_BROKER_CA_FILE: /run/secrets/broker_tls_ca
     secrets: [deca_temporal_payload_key, temporal_server_ca, temporal_worker_cert, temporal_worker_key,
               deca_broker_worker_token, broker_tls_ca]
 
@@ -97,13 +97,13 @@ services:
     <<: *common
     restart: "no"
     profiles: [jobs]
-    command: ["deca-soar", "anchor-ledger", "--sink", "file:/var/lib/deca-soar/anchors/ledger-anchors.ndjson"]
+    command: ["hypersoar", "anchor-ledger", "--sink", "file:/var/lib/deca-soar/anchors/ledger-anchors.ndjson"]
     environment:
       <<: *env
-      DECA_DB_URL_FILE: /run/secrets/deca_db_url_auditor
+      HYPERSOAR_DB_URL_FILE: /run/secrets/deca_db_url_auditor
     secrets: [deca_db_url_auditor]
     volumes:
-      - ${DECA_ANCHOR_DIR:-/var/lib/deca-soar/anchors}:/var/lib/deca-soar/anchors
+      - ${HYPERSOAR_ANCHOR_DIR:-/var/lib/deca-soar/anchors}:/var/lib/deca-soar/anchors
 
 networks:
   deca: {}

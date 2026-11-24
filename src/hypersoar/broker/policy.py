@@ -10,13 +10,13 @@ import ipaddress
 import re
 from dataclasses import dataclass, field
 
-from deca_soar.broker.catalog import SEVERITIES, VERDICTS, ActionSpec, Protected
-from deca_soar.common.pii import canonical_ip
+from hypersoar.broker.catalog import SEVERITIES, VERDICTS, ActionSpec, Protected
+from hypersoar.common.pii import canonical_ip
 
 DECISION_SOURCES = ("rule", "llm")
 TOKEN_KIND_RE = re.compile(r"^tok_([a-z]+)_[0-9a-f]{16}$")
 # RFC 5737 / RFC 3849 documentation ranges. Not globally routable, so rejected as block targets,
-# except in tests and the disposable e2e stack (never with DECA_ENV=production).
+# except in tests and the disposable e2e stack (never with HYPERSOAR_ENV=production).
 TEST_NETS = tuple(
     ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
 )

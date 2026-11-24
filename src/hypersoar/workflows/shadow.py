@@ -8,8 +8,8 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from deca_soar.workflows import WORKFLOW_NAME
-    from deca_soar.workflows.activities import BrokerSubmitter, triage_mock
+    from hypersoar.workflows import WORKFLOW_NAME
+    from hypersoar.workflows.activities import BrokerSubmitter, triage_mock
 
 # Unlimited attempts within schedule_to_close: an outage of the broker (or of the worker that runs
 # the activity) delays the request but never drops it.

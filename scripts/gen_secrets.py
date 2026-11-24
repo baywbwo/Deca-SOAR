@@ -4,7 +4,7 @@ Values are never printed. Existing files are never overwritten.
 
   python scripts/gen_secrets.py /etc/deca-soar/secrets
 
-DB URLs, the broker worker token (deca-soar create-principal) and TLS material are created separately
+DB URLs, the broker worker token (hypersoar create-principal) and TLS material are created separately
 (see deploy/RUNBOOK.md).
 """
 

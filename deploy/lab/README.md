@@ -1,4 +1,4 @@
-# DECA SOAR lab (shadow mode, synthetic data)
+# HyperSoar lab (shadow mode, synthetic data)
 
 Runs the phase 0 production stack (`deploy/deca/docker-compose.yml`) on one VM with Docker, so the owner
 can watch it working. **Lab only.** Nothing here is a production setting, and the data is synthetic.
@@ -14,7 +14,7 @@ can watch it working. **Lab only.** Nothing here is a production setting, and th
 
 Not published on the host: Postgres, Temporal (no UI, HTTP API off), the broker. The only way in from
 outside is the tunnel to the console (HTTPS, login with rate limit). The broker runs with
-`DECA_ENV=lab` because `policy/protected.yaml` still holds placeholders and the synthetic alerts use
+`HYPERSOAR_ENV=lab` because `policy/protected.yaml` still holds placeholders and the synthetic alerts use
 TEST-NET addresses; every action stays shadow.
 
 ## Bring-up
@@ -23,29 +23,29 @@ Run as a sudoer on the VM, repo checked out at the commit to deploy (`$REPO`, `$
 
 1. Images:
    ```sh
-   docker build -f deploy/deca/Dockerfile -t deca-soar:$SHA .
+   docker build -f deploy/deca/Dockerfile -t hypersoar:$SHA .
    deploy/lab/fetch-temporal.sh /var/cache/deca-lab/temporal
    deploy/lab/build-temporal.sh /var/cache/deca-lab/temporal
    ```
 2. Secrets. On the operator machine, generate the owner password and the console password, keep both in
-   the operator's vault, and hash the console password (`deca-soar console-hash` reads it on stdin). Send
+   the operator's vault, and hash the console password (`hypersoar console-hash` reads it on stdin). Send
    only `{"owner_password": ..., "console_hash": ...}` on stdin:
    ```sh
    <json> | sudo docker run --rm -i --user 0 --network none -v /etc/deca-soar:/etc/deca-soar \
      -v /var/lib/deca-soar:/var/lib/deca-soar -v $REPO/deploy/lab/lab_setup.py:/lab_setup.py:ro \
-     deca-soar:$SHA python /lab_setup.py
+     hypersoar:$SHA python /lab_setup.py
    ```
    Then write `/etc/deca-soar/deca.env` (no secrets):
    ```
-   DECA_SOAR_IMAGE=deca-soar:<sha>
-   DECA_GIT_SHA=<sha>
-   DECA_BASE_IMAGE=<base image digest from deploy/deca/Dockerfile>
-   DECA_TEMPORAL_ADDRESS=172.30.124.10:7233
-   DECA_BROKER_URL=https://broker:8100
-   DECA_BIND_IP=172.30.124.1
-   DECA_REPLAY_DIR=/var/lib/deca-soar/replay
-   DECA_ANCHOR_DIR=/var/lib/deca-soar/anchors
-   DECA_POLICY_HOST_DIR=<repo>/policy
+   HYPERSOAR_IMAGE=hypersoar:<sha>
+   HYPERSOAR_GIT_SHA=<sha>
+   HYPERSOAR_BASE_IMAGE=<base image digest from deploy/deca/Dockerfile>
+   HYPERSOAR_TEMPORAL_ADDRESS=172.30.124.10:7233
+   HYPERSOAR_BROKER_URL=https://broker:8100
+   HYPERSOAR_BIND_IP=172.30.124.1
+   HYPERSOAR_REPLAY_DIR=/var/lib/deca-soar/replay
+   HYPERSOAR_ANCHOR_DIR=/var/lib/deca-soar/anchors
+   HYPERSOAR_POLICY_HOST_DIR=<repo>/policy
    ```
 3. Database and Temporal:
    ```sh
@@ -60,9 +60,9 @@ Run as a sudoer on the VM, repo checked out at the commit to deploy (`$REPO`, `$
    ```
 4. Owner jobs, then the service logins (RUNBOOK section 5):
    ```sh
-   <owner DSN> | sudo DECA_OWNER_COMPOSE_OVERRIDE=$REPO/deploy/lab/docker-compose.owner.lab.yml \
+   <owner DSN> | sudo HYPERSOAR_OWNER_COMPOSE_OVERRIDE=$REPO/deploy/lab/docker-compose.owner.lab.yml \
      deploy/deca/bin/deca-owner-run.sh migrate
-   <owner DSN> | sudo DECA_OWNER_COMPOSE_OVERRIDE=... deploy/deca/bin/deca-owner-run.sh create-principal \
+   <owner DSN> | sudo HYPERSOAR_OWNER_COMPOSE_OVERRIDE=... deploy/deca/bin/deca-owner-run.sh create-principal \
      --name temporal-worker --kind service --role analyst --token-file /out/worker.token
    sudo mv /etc/deca-soar/out/worker.token /etc/deca-soar/secrets/deca_broker_worker_token
    sudo cat /etc/deca-soar/lab/db-logins.sql | $C exec -T -u postgres postgres psql -v ON_ERROR_STOP=1 -q

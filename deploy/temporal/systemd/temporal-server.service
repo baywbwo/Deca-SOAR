@@ -1,5 +1,5 @@
 [Unit]
-Description=DECA SOAR: Temporal server 1.32.2 (self-hosted, MIT)
+Description=HyperSoar: Temporal server 1.32.2 (self-hosted, MIT)
 After=network-online.target temporal-schema.service
 Requires=temporal-schema.service
 Wants=network-online.target

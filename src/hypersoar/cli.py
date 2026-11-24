@@ -12,23 +12,23 @@ from pathlib import Path
 import psycopg
 from psycopg.rows import dict_row
 
-from deca_soar import ledger
-from deca_soar.ledger.anchor import SinkError, open_sink
-from deca_soar.broker import service
-from deca_soar.broker.roles import ROLES
-from deca_soar.common.config import ConfigError, read_secret
-from deca_soar.common.db import MIGRATIONS_DIR, migrate
-from deca_soar.common.dbguard import assert_least_privilege_login
+from hypersoar import ledger
+from hypersoar.ledger.anchor import SinkError, open_sink
+from hypersoar.broker import service
+from hypersoar.broker.roles import ROLES
+from hypersoar.common.config import ConfigError, read_secret
+from hypersoar.common.db import MIGRATIONS_DIR, migrate
+from hypersoar.common.dbguard import assert_least_privilege_login
 
 
 def _db_url() -> str:
-    url = read_secret("DECA_DB_URL")
+    url = read_secret("HYPERSOAR_DB_URL")
     assert url is not None
     return url
 
 
 def cmd_migrate(_: argparse.Namespace) -> int:
-    applied = migrate(_db_url(), Path(os.environ.get("DECA_MIGRATIONS_DIR", MIGRATIONS_DIR)))
+    applied = migrate(_db_url(), Path(os.environ.get("HYPERSOAR_MIGRATIONS_DIR", MIGRATIONS_DIR)))
     print(json.dumps({"applied": applied}))
     return 0
 
@@ -99,14 +99,14 @@ def cmd_kill_switch(a: argparse.Namespace) -> int:
 
 
 def cmd_worker(_: argparse.Namespace) -> int:
-    from deca_soar.workflows.worker import main as worker_main
+    from hypersoar.workflows.worker import main as worker_main
 
     return worker_main()
 
 
 def cmd_console_hash(_: argparse.Namespace) -> int:
-    """Read a password on stdin, print its scrypt hash for DECA_CONSOLE_PASSWORD_HASH_FILE."""
-    from deca_soar.console.auth import hash_password
+    """Read a password on stdin, print its scrypt hash for HYPERSOAR_CONSOLE_PASSWORD_HASH_FILE."""
+    from hypersoar.console.auth import hash_password
 
     password = sys.stdin.readline().rstrip("\n")
     try:
@@ -118,14 +118,14 @@ def cmd_console_hash(_: argparse.Namespace) -> int:
 
 
 def cmd_synth_alerts(a: argparse.Namespace) -> int:
-    from deca_soar import synth
+    from hypersoar import synth
 
     synth.run(Path(a.out), a.interval, a.count, a.seed, log=lambda m: print(m, flush=True))
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="deca-soar")
+    ap = argparse.ArgumentParser(prog="hypersoar")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("migrate").set_defaults(fn=cmd_migrate)
     cp = sub.add_parser("create-principal")

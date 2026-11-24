@@ -10,12 +10,12 @@ from fastapi.testclient import TestClient
 from psycopg import errors
 from psycopg.rows import dict_row
 
-from deca_soar import synth
-from deca_soar.common.config import ConfigError
-from deca_soar.common.dbguard import login_problems
-from deca_soar.common.pii import Tokenizer
-from deca_soar.console import auth
-from deca_soar.gateway.normalize import normalize
+from hypersoar import synth
+from hypersoar.common.config import ConfigError
+from hypersoar.common.dbguard import login_problems
+from hypersoar.common.pii import Tokenizer
+from hypersoar.console import auth
+from hypersoar.gateway.normalize import normalize
 
 from conftest import make_login
 from helpers import ingest, waf_alert
@@ -134,18 +134,18 @@ def test_extra_grant_to_viewer_refused(viewer, conn):
 def console_env(monkeypatch, tmp_path, viewer, pw_hash):
     f = tmp_path / "console.hash"
     f.write_text(pw_hash + "\n")
-    monkeypatch.setenv("DECA_DB_URL", viewer)
-    monkeypatch.setenv("DECA_CONSOLE_PASSWORD_HASH_FILE", str(f))
-    monkeypatch.setenv("DECA_CONSOLE_USER", "owner")
-    monkeypatch.setenv("DECA_CONSOLE_SYNTHETIC", "1")
-    monkeypatch.setenv("DECA_GIT_SHA", "abc1234")
-    monkeypatch.delenv("DECA_CONSOLE_TRUSTED_PROXIES", raising=False)
+    monkeypatch.setenv("HYPERSOAR_DB_URL", viewer)
+    monkeypatch.setenv("HYPERSOAR_CONSOLE_PASSWORD_HASH_FILE", str(f))
+    monkeypatch.setenv("HYPERSOAR_CONSOLE_USER", "owner")
+    monkeypatch.setenv("HYPERSOAR_CONSOLE_SYNTHETIC", "1")
+    monkeypatch.setenv("HYPERSOAR_GIT_SHA", "abc1234")
+    monkeypatch.delenv("HYPERSOAR_CONSOLE_TRUSTED_PROXIES", raising=False)
     return monkeypatch
 
 
 @pytest.fixture
 def console(console_env):
-    from deca_soar.console.app import app
+    from hypersoar.console.app import app
     with TestClient(app, base_url="https://testserver") as c:
         yield c
 
@@ -165,7 +165,7 @@ def test_login_flow_and_cookie_flags(console):
     r = _login(console)
     assert r.status_code == 303 and r.headers["location"] == "/"
     cookie = r.headers["set-cookie"]
-    assert cookie.startswith("__Host-deca_console=")
+    assert cookie.startswith("__Host-hypersoar_console=")
     for flag in ("HttpOnly", "Secure", "SameSite=strict", "Path=/"):
         assert flag.lower() in cookie.lower()
     assert console.get("/").status_code == 200
@@ -202,7 +202,7 @@ def test_security_headers(console):
 
 
 def test_static_has_no_inline_code_and_unknown_files_404(console):
-    from deca_soar.console.app import STATIC
+    from hypersoar.console.app import STATIC
     page = (STATIC / "index.html").read_text()
     assert "<script>" not in page and "style=" not in page and "onclick" not in page
     js = (STATIC / "console.js").read_text()
@@ -213,7 +213,7 @@ def test_static_has_no_inline_code_and_unknown_files_404(console):
 
 
 def test_no_write_endpoints():
-    from deca_soar.console.app import fastapi_app
+    from hypersoar.console.app import fastapi_app
     writes = sorted((r.path, m) for r in fastapi_app.routes for m in getattr(r, "methods", set()) - {"GET", "HEAD"})
     assert writes == [("/login", "POST"), ("/logout", "POST")]
 
@@ -225,8 +225,8 @@ def test_body_limit(console):
 
 
 def test_refuses_to_start_with_broker_login(console_env, roles):
-    console_env.setenv("DECA_DB_URL", roles["broker"])
-    from deca_soar.console.app import app
+    console_env.setenv("HYPERSOAR_DB_URL", roles["broker"])
+    from hypersoar.console.app import app
     with pytest.raises(ConfigError, match="console database login has more privilege"):
         with TestClient(app, base_url="https://testserver"):
             pass
@@ -241,7 +241,7 @@ def test_state_shows_alert_verdict_and_shadow_decision(client, principals, pool,
         resp = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                            json=body(str(r["alert_id"]), params={"ip_token": tok, "waf_instance": "waf-lab"}))
         assert resp.status_code == 201
-    from deca_soar.console.app import app
+    from hypersoar.console.app import app
     with TestClient(app, base_url="https://testserver") as c:
         assert _login(c).status_code == 303
         r = c.get("/api/state")

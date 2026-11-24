@@ -12,9 +12,9 @@ or admin DSN never reaches a running service. There is no switch to turn this of
 
 from __future__ import annotations
 
-from deca_soar.common.config import ConfigError
+from hypersoar.common.config import ConfigError
 
-DECA_SCHEMAS = ("gateway", "vault", "broker", "ledger")
+HYPERSOAR_SCHEMAS = ("gateway", "vault", "broker", "ledger")
 TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 
 # service -> (group role, {table: table-level privileges}). Column-level grants are in EXPECTED_COLUMNS.
@@ -103,7 +103,7 @@ def login_problems(conn, service: str) -> list[str]:
         " WHERE n.nspname = ANY(%s) AND pg_has_role(current_user, c.relowner, 'MEMBER')"
         " UNION ALL SELECT current_database() FROM pg_database d"
         " WHERE d.datname = current_database() AND pg_has_role(current_user, d.datdba, 'MEMBER')",
-        (list(DECA_SCHEMAS), list(DECA_SCHEMAS)),
+        (list(HYPERSOAR_SCHEMAS), list(HYPERSOAR_SCHEMAS)),
     ):
         problems.append(f"login owns {obj}")
 
@@ -116,7 +116,7 @@ def login_problems(conn, service: str) -> list[str]:
         " WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')"
         " AND (n.nspname = ANY(%s) OR (n.nspname = 'public' AND c.relname = 'deca_schema_migrations'))"
         " AND has_table_privilege(c.oid, p)",
-        (privs, list(DECA_SCHEMAS)),
+        (privs, list(HYPERSOAR_SCHEMAS)),
     ):
         if priv not in tables.get(table, set()):
             problems.append(f"login has {priv} on {table}")
@@ -130,7 +130,7 @@ def login_problems(conn, service: str) -> list[str]:
         " CROSS JOIN unnest(%s::text[]) p"
         " WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname = ANY(%s)"
         " AND has_column_privilege(c.oid, a.attnum, p) AND NOT has_table_privilege(c.oid, p)",
-        (list(COLUMN_PRIVILEGES), list(DECA_SCHEMAS)),
+        (list(COLUMN_PRIVILEGES), list(HYPERSOAR_SCHEMAS)),
     ):
         if (table, column, priv) not in expected_columns:
             problems.append(f"login has {priv}({column}) on {table}")
@@ -141,7 +141,7 @@ def login_problems(conn, service: str) -> list[str]:
         " FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
         " WHERE (n.nspname = ANY(%s) OR (n.nspname = 'public' AND p.prosecdef))"
         " AND p.prokind IN ('f', 'p') AND has_function_privilege(p.oid, 'EXECUTE')",
-        (list(DECA_SCHEMAS),),
+        (list(HYPERSOAR_SCHEMAS),),
     ):
         problems.append(f"login can EXECUTE {func}")
 
@@ -149,14 +149,14 @@ def login_problems(conn, service: str) -> list[str]:
         "SELECT n.nspname || '.' || c.relname, p FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
         " CROSS JOIN unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) p"
         " WHERE c.relkind = 'S' AND n.nspname = ANY(%s) AND has_sequence_privilege(c.oid, p)",
-        (list(DECA_SCHEMAS),),
+        (list(HYPERSOAR_SCHEMAS),),
     ):
         if not (priv == "USAGE" and seq == "ledger.entry_seq_seq" and service in LEDGER_WRITERS):
             problems.append(f"login has {priv} on sequence {seq}")
 
     for (schema,) in rows(
         "SELECT s FROM unnest(%s::text[]) s WHERE has_schema_privilege(s, 'CREATE')",
-        (list(DECA_SCHEMAS) + ["public"],),
+        (list(HYPERSOAR_SCHEMAS) + ["public"],),
     ):
         problems.append(f"login can CREATE in schema {schema}")
     if rows("SELECT 1 WHERE has_database_privilege(current_database(), 'CREATE')"):

@@ -1,5 +1,5 @@
 [Unit]
-Description=DECA SOAR: Temporal schema setup/upgrade on RDS
+Description=HyperSoar: Temporal schema setup/upgrade on RDS
 After=network-online.target
 Wants=network-online.target
 

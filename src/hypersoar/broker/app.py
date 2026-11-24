@@ -11,17 +11,17 @@ from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from deca_soar import ledger
-from deca_soar.broker import catalog as catalog_mod
-from deca_soar.broker import roles, service
-from deca_soar.broker.roles import Principal
-from deca_soar.common.config import ConfigError, Settings, assert_no_write_credentials
-from deca_soar.common.db import make_pool
-from deca_soar.common.dbguard import assert_least_privilege_login
-from deca_soar.common.http import DEFAULT_MAX_BODY, BodyLimit
-from deca_soar.common.pii import Vault
+from hypersoar import ledger
+from hypersoar.broker import catalog as catalog_mod
+from hypersoar.broker import roles, service
+from hypersoar.broker.roles import Principal
+from hypersoar.common.config import ConfigError, Settings, assert_no_write_credentials
+from hypersoar.common.db import make_pool
+from hypersoar.common.dbguard import assert_least_privilege_login
+from hypersoar.common.http import DEFAULT_MAX_BODY, BodyLimit
+from hypersoar.common.pii import Vault
 
-log = logging.getLogger("deca_soar.broker")
+log = logging.getLogger("hypersoar.broker")
 
 
 class DecisionIn(BaseModel):
@@ -62,12 +62,12 @@ async def lifespan(app: FastAPI):
     assert_no_write_credentials()
     settings = Settings.for_broker()
     cat, protected = catalog_mod.load(settings.policy_dir)
-    production = os.environ.get("DECA_ENV") == "production"
+    production = os.environ.get("HYPERSOAR_ENV") == "production"
     if production and protected.has_placeholders:
         raise ConfigError("protected.yaml still has placeholder entries; refusing to start in production")
-    allow_test_nets = os.environ.get("DECA_ALLOW_TEST_NETS") == "1"
+    allow_test_nets = os.environ.get("HYPERSOAR_ALLOW_TEST_NETS") == "1"
     if production and allow_test_nets:
-        raise ConfigError("DECA_ALLOW_TEST_NETS is for tests only; refusing to start in production")
+        raise ConfigError("HYPERSOAR_ALLOW_TEST_NETS is for tests only; refusing to start in production")
     app.state.broker = service.Broker(
         catalog=cat,
         protected=protected,
@@ -88,8 +88,8 @@ async def lifespan(app: FastAPI):
     app.state.pool.close()
 
 
-app = FastAPI(title="DECA SOAR Action Broker", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(BodyLimit, max_bytes=int(os.environ.get("DECA_MAX_BODY_BYTES", DEFAULT_MAX_BODY)))
+app = FastAPI(title="HyperSoar Action Broker", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(BodyLimit, max_bytes=int(os.environ.get("HYPERSOAR_MAX_BODY_BYTES", DEFAULT_MAX_BODY)))
 
 
 def current_principal(request: Request) -> Principal:

@@ -1,5 +1,5 @@
 [Unit]
-Description=DECA SOAR: hourly ledger anchor (shipped off-host by Logtail)
+Description=HyperSoar: hourly ledger anchor (shipped off-host by Logtail)
 
 [Timer]
 OnCalendar=*-*-* *:15:00

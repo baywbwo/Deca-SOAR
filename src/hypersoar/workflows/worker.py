@@ -1,9 +1,9 @@
 """Worker process: runs AlertShadowWorkflow and its activities.
 
-  DECA_BROKER_URL             broker base URL (https required with DECA_ENV=production)
-  DECA_BROKER_TOKEN(_FILE)    service principal token, role analyst
-  DECA_BROKER_CA_FILE         CA bundle for the broker's TLS cert (optional)
-  plus the DECA_TEMPORAL_* settings in deca_soar.workflows.config.
+  HYPERSOAR_BROKER_URL             broker base URL (https required with HYPERSOAR_ENV=production)
+  HYPERSOAR_BROKER_TOKEN(_FILE)    service principal token, role analyst
+  HYPERSOAR_BROKER_CA_FILE         CA bundle for the broker's TLS cert (optional)
+  plus the HYPERSOAR_TEMPORAL_* settings in hypersoar.workflows.config.
 
 The worker holds no database URL and no vault or tokenisation key: it only ever sees tokens.
 """
@@ -17,25 +17,25 @@ import signal
 
 from temporalio.worker import Worker
 
-from deca_soar.common.config import ConfigError, assert_no_write_credentials, read_secret
-from deca_soar.workflows.activities import BrokerSubmitter, triage_mock
-from deca_soar.workflows.config import TemporalSettings
-from deca_soar.workflows.shadow import AlertShadowWorkflow
+from hypersoar.common.config import ConfigError, assert_no_write_credentials, read_secret
+from hypersoar.workflows.activities import BrokerSubmitter, triage_mock
+from hypersoar.workflows.config import TemporalSettings
+from hypersoar.workflows.shadow import AlertShadowWorkflow
 
-log = logging.getLogger("deca_soar.worker")
+log = logging.getLogger("hypersoar.worker")
 logging.getLogger("httpx").setLevel(logging.WARNING)
-WORKER_FORBIDDEN_ENV = ("DECA_DB_URL", "DECA_VAULT_PRIVATE_KEY", "DECA_VAULT_KEY", "DECA_TOKENIZATION_KEY")
+WORKER_FORBIDDEN_ENV = ("HYPERSOAR_DB_URL", "HYPERSOAR_VAULT_PRIVATE_KEY", "HYPERSOAR_VAULT_KEY", "HYPERSOAR_TOKENIZATION_KEY")
 
 
 def broker_from_env() -> BrokerSubmitter:
-    url = os.environ.get("DECA_BROKER_URL", "").strip()
+    url = os.environ.get("HYPERSOAR_BROKER_URL", "").strip()
     if not url:
-        raise ConfigError("DECA_BROKER_URL is required")
-    if os.environ.get("DECA_ENV") == "production" and not url.startswith("https://"):
-        raise ConfigError("production requires an https:// DECA_BROKER_URL")
-    token = read_secret("DECA_BROKER_TOKEN")
+        raise ConfigError("HYPERSOAR_BROKER_URL is required")
+    if os.environ.get("HYPERSOAR_ENV") == "production" and not url.startswith("https://"):
+        raise ConfigError("production requires an https:// HYPERSOAR_BROKER_URL")
+    token = read_secret("HYPERSOAR_BROKER_TOKEN")
     assert token is not None
-    return BrokerSubmitter(url, token, verify=os.environ.get("DECA_BROKER_CA_FILE") or True)
+    return BrokerSubmitter(url, token, verify=os.environ.get("HYPERSOAR_BROKER_CA_FILE") or True)
 
 
 def check_env() -> None:
@@ -59,7 +59,7 @@ async def run() -> None:
         task_queue=ts.task_queue,
         workflows=[AlertShadowWorkflow],
         activities=[triage_mock, broker.submit],
-        max_concurrent_activities=int(os.environ.get("DECA_WORKER_MAX_ACTIVITIES", "20")),
+        max_concurrent_activities=int(os.environ.get("HYPERSOAR_WORKER_MAX_ACTIVITIES", "20")),
     )
     log.info("worker ready: namespace=%s task_queue=%s tls=%s", ts.namespace, ts.task_queue, ts.tls is not None)
     async with worker:

@@ -9,13 +9,13 @@ from fastapi.testclient import TestClient
 from psycopg import errors
 from psycopg.rows import dict_row
 
-from deca_soar import cli, ledger
-from deca_soar.broker import catalog as catalog_mod
-from deca_soar.broker import policy, service
-from deca_soar.common.config import DEFAULT_INTERNAL_CIDRS, ConfigError, Settings, _cidrs
-from deca_soar.common.db import make_pool
-from deca_soar.common.pii import Tokenizer, Vault, VaultWriter, canonical_ip, vault_public_key
-from deca_soar.gateway.normalize import normalize
+from hypersoar import cli, ledger
+from hypersoar.broker import catalog as catalog_mod
+from hypersoar.broker import policy, service
+from hypersoar.common.config import DEFAULT_INTERNAL_CIDRS, ConfigError, Settings, _cidrs
+from hypersoar.common.db import make_pool
+from hypersoar.common.pii import Tokenizer, Vault, VaultWriter, canonical_ip, vault_public_key
+from hypersoar.gateway.normalize import normalize
 
 from helpers import ingest, waf_alert
 from test_broker_api import _alert, body, client, env, principals  # noqa: F401  (fixtures)
@@ -117,9 +117,9 @@ def test_f2_mapped_protected_ip_rejected_end_to_end(client, principals, pool, se
 
 
 def test_f2_production_refuses_test_nets(env, principals):
-    env.setenv("DECA_ENV", "production")
-    env.setenv("DECA_ALLOW_TEST_NETS", "1")
-    from deca_soar.broker.app import app
+    env.setenv("HYPERSOAR_ENV", "production")
+    env.setenv("HYPERSOAR_ALLOW_TEST_NETS", "1")
+    from hypersoar.broker.app import app
     with pytest.raises(ConfigError):
         with TestClient(app):
             pass
@@ -167,7 +167,7 @@ def test_f3_roles_work_for_their_job_and_nothing_else(roles, settings, tmp_path,
     aid, alert = _alert(conn)
     cat, prot = catalog_mod.load(settings.policy_dir)
     b = service.Broker(cat, prot, Vault(settings.vault_private_key), CIDRS, allow_test_nets=True)
-    from deca_soar.broker.roles import Principal
+    from hypersoar.broker.roles import Principal
     with psycopg.connect(roles["broker"], row_factory=dict_row) as bc, bc.transaction():
         view, _ = service.submit(bc, b, Principal(principal, "svc", "service", "analyst"),
                                  body(aid, params={"ip_token": alert["entities"]["src_ip"], "waf_instance": "w1"}))
@@ -196,7 +196,7 @@ def _owner_rewrite(conn):
 
 def test_f3_anchor_detects_owner_rewrite(pool, settings, tmp_path, conn, roles, monkeypatch, capsys):
     ingest(pool, settings, tmp_path, [waf_alert(), waf_alert(ip="203.0.113.50")])
-    monkeypatch.setenv("DECA_DB_URL", roles["auditor"])
+    monkeypatch.setenv("HYPERSOAR_DB_URL", roles["auditor"])
     sink = f"file:{tmp_path / 'anchors.ndjson'}"
     assert cli.main(["anchor-ledger", "--sink", sink]) == 0
     rec = json.loads(capsys.readouterr().out)
@@ -215,7 +215,7 @@ def test_f3_anchor_detects_owner_rewrite(pool, settings, tmp_path, conn, roles, 
 
 
 def test_f3_sls_sink_is_marked_untested(monkeypatch, roles, capsys):
-    monkeypatch.setenv("DECA_DB_URL", roles["auditor"])
+    monkeypatch.setenv("HYPERSOAR_DB_URL", roles["auditor"])
     assert cli.main(["anchor-ledger", "--sink", "sls:deca-soar/ledger-anchor"]) == 2
     assert "not implemented or tested" in capsys.readouterr().err
 
@@ -234,11 +234,11 @@ def test_f5_gateway_writer_cannot_open(conn, settings):
         Vault(b"\x03" * 32).reveal(conn, token)
 
 
-@pytest.mark.parametrize("name", ["DECA_VAULT_PRIVATE_KEY", "DECA_VAULT_KEY"])
+@pytest.mark.parametrize("name", ["HYPERSOAR_VAULT_PRIVATE_KEY", "HYPERSOAR_VAULT_KEY"])
 def test_f5_gateway_refuses_decryption_keys(monkeypatch, name):
-    monkeypatch.setenv("DECA_DB_URL", "postgresql://x/y")
-    monkeypatch.setenv("DECA_TOKENIZATION_KEY", KEY.hex())
-    monkeypatch.setenv("DECA_VAULT_PUBLIC_KEY", vault_public_key(b"\x02" * 32).hex())
+    monkeypatch.setenv("HYPERSOAR_DB_URL", "postgresql://x/y")
+    monkeypatch.setenv("HYPERSOAR_TOKENIZATION_KEY", KEY.hex())
+    monkeypatch.setenv("HYPERSOAR_VAULT_PUBLIC_KEY", vault_public_key(b"\x02" * 32).hex())
     monkeypatch.setenv(name, (b"\x02" * 32).hex())
     with pytest.raises(ConfigError, match="must not hold"):
         Settings.for_gateway()

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run one deca-soar command as the database owner without keeping the owner DSN on the host (review N2).
+# Run one hypersoar command as the database owner without keeping the owner DSN on the host (review N2).
 #
 #   <ops-vault get deca_db_url_owner> | sudo deploy/deca/bin/deca-owner-run.sh migrate
 #   <ops-vault get deca_db_url_owner> | sudo deploy/deca/bin/deca-owner-run.sh create-principal \
@@ -16,10 +16,10 @@ usage() { echo "usage: <owner DSN on stdin> | $0 migrate|create-principal [args]
 [ $# -ge 1 ] || usage
 case "$1" in migrate|create-principal) ;; *) usage ;; esac
 
-REPO=${DECA_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)}
-ENV_FILE=${DECA_ENV_FILE:-/etc/deca-soar/deca.env}
-SECRETS_DIR=${DECA_SECRETS_DIR:-/etc/deca-soar/secrets}
-TMPBASE=${DECA_OWNER_TMPDIR:-/dev/shm}
+REPO=${HYPERSOAR_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)}
+ENV_FILE=${HYPERSOAR_ENV_FILE:-/etc/deca-soar/deca.env}
+SECRETS_DIR=${HYPERSOAR_SECRETS_DIR:-/etc/deca-soar/secrets}
+TMPBASE=${HYPERSOAR_OWNER_TMPDIR:-/dev/shm}
 
 if [ -e "$SECRETS_DIR/deca_db_url_owner" ]; then
   echo "$SECRETS_DIR/deca_db_url_owner exists: the owner DSN must not be stored on the host; shred it first" >&2
@@ -60,8 +60,8 @@ if [ "$(id -u)" = 0 ]; then
 fi
 chmod 0400 "$DIR/deca_db_url_owner"
 
-# DECA_OWNER_COMPOSE_OVERRIDE: optional extra compose file (the lab uses deploy/lab/docker-compose.owner.lab.yml).
-OVERRIDE=${DECA_OWNER_COMPOSE_OVERRIDE:-}
-DECA_OWNER_DSN_FILE="$DIR/deca_db_url_owner" \
+# HYPERSOAR_OWNER_COMPOSE_OVERRIDE: optional extra compose file (the lab uses deploy/lab/docker-compose.owner.lab.yml).
+OVERRIDE=${HYPERSOAR_OWNER_COMPOSE_OVERRIDE:-}
+HYPERSOAR_OWNER_DSN_FILE="$DIR/deca_db_url_owner" \
   docker compose -f "$REPO/deploy/deca/docker-compose.owner.yml" ${OVERRIDE:+-f "$OVERRIDE"} --env-file "$ENV_FILE" \
-  run --rm owner-job deca-soar "$@"
+  run --rm owner-job hypersoar "$@"

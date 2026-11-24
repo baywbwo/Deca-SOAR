@@ -1,4 +1,4 @@
-"""Temporal workflow tests. Integration tests need DECA_TEST_TEMPORAL_BIN (the `temporal` CLI): a private
+"""Temporal workflow tests. Integration tests need HYPERSOAR_TEST_TEMPORAL_BIN (the `temporal` CLI): a private
 dev server is started on loopback. Nothing here talks to a real broker; the e2e run covers that."""
 
 from __future__ import annotations
@@ -19,14 +19,14 @@ from temporalio.converter import DataConverter
 from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.worker import Worker
 
-from deca_soar.common.config import ConfigError
-from deca_soar.gateway.starter import TemporalStarter
-from deca_soar.workflows import WORKFLOW_NAME, workflow_id
-from deca_soar.workflows.activities import BrokerSubmitter, triage_mock
-from deca_soar.workflows.codec import AesGcmCodec, CodecError
-from deca_soar.workflows.config import TemporalSettings, data_converter
-from deca_soar.workflows.shadow import AlertShadowWorkflow, build_request
-from deca_soar.workflows.worker import check_env
+from hypersoar.common.config import ConfigError
+from hypersoar.gateway.starter import TemporalStarter
+from hypersoar.workflows import WORKFLOW_NAME, workflow_id
+from hypersoar.workflows.activities import BrokerSubmitter, triage_mock
+from hypersoar.workflows.codec import AesGcmCodec, CodecError
+from hypersoar.workflows.config import TemporalSettings, data_converter
+from hypersoar.workflows.shadow import AlertShadowWorkflow, build_request
+from hypersoar.workflows.worker import check_env
 
 KEY = b"\x07" * 32
 NS = "deca-soar"
@@ -117,7 +117,7 @@ def test_broker_submit_success_and_unreachable():
 
 
 def test_worker_refuses_db_and_vault_credentials(monkeypatch):
-    for name in ("DECA_DB_URL", "DECA_VAULT_PRIVATE_KEY", "DECA_TOKENIZATION_KEY"):
+    for name in ("HYPERSOAR_DB_URL", "HYPERSOAR_VAULT_PRIVATE_KEY", "HYPERSOAR_TOKENIZATION_KEY"):
         monkeypatch.setenv(name, "x")
         with pytest.raises(ConfigError):
             check_env()
@@ -126,21 +126,21 @@ def test_worker_refuses_db_and_vault_credentials(monkeypatch):
 
 
 def test_temporal_settings_require_mtls_in_production(monkeypatch, tmp_path):
-    monkeypatch.setenv("DECA_TEMPORAL_ADDRESS", "temporal:7233")
-    monkeypatch.setenv("DECA_TEMPORAL_PAYLOAD_KEY", KEY.hex())
+    monkeypatch.setenv("HYPERSOAR_TEMPORAL_ADDRESS", "temporal:7233")
+    monkeypatch.setenv("HYPERSOAR_TEMPORAL_PAYLOAD_KEY", KEY.hex())
     assert TemporalSettings.from_env().tls is None
-    monkeypatch.setenv("DECA_ENV", "production")
+    monkeypatch.setenv("HYPERSOAR_ENV", "production")
     with pytest.raises(ConfigError, match="mTLS"):
         TemporalSettings.from_env()
     for n in ("ca", "cert", "key"):
         (tmp_path / n).write_bytes(b"pem")
-    monkeypatch.setenv("DECA_TEMPORAL_TLS_CA_FILE", str(tmp_path / "ca"))
+    monkeypatch.setenv("HYPERSOAR_TEMPORAL_TLS_CA_FILE", str(tmp_path / "ca"))
     with pytest.raises(ConfigError, match="all of"):
         TemporalSettings.from_env()
-    monkeypatch.setenv("DECA_TEMPORAL_TLS_CERT_FILE", str(tmp_path / "cert"))
-    monkeypatch.setenv("DECA_TEMPORAL_TLS_KEY_FILE", str(tmp_path / "key"))
+    monkeypatch.setenv("HYPERSOAR_TEMPORAL_TLS_CERT_FILE", str(tmp_path / "cert"))
+    monkeypatch.setenv("HYPERSOAR_TEMPORAL_TLS_KEY_FILE", str(tmp_path / "key"))
     assert TemporalSettings.from_env().tls is not None
-    monkeypatch.delenv("DECA_TEMPORAL_PAYLOAD_KEY")
+    monkeypatch.delenv("HYPERSOAR_TEMPORAL_PAYLOAD_KEY")
     with pytest.raises(ConfigError, match="PAYLOAD_KEY"):
         TemporalSettings.from_env()
 
@@ -156,9 +156,9 @@ def _free_port() -> int:
 
 @pytest.fixture(scope="session")
 def temporal_address(tmp_path_factory):
-    binary = os.environ.get("DECA_TEST_TEMPORAL_BIN")
+    binary = os.environ.get("HYPERSOAR_TEST_TEMPORAL_BIN")
     if not binary:
-        pytest.skip("no Temporal dev server (set DECA_TEST_TEMPORAL_BIN)")
+        pytest.skip("no Temporal dev server (set HYPERSOAR_TEST_TEMPORAL_BIN)")
     port = _free_port()
     log = (tmp_path_factory.mktemp("temporal") / "dev.log").open("w")
     proc = subprocess.Popen(
@@ -299,7 +299,7 @@ def test_alert_started_while_worker_down_is_not_lost(temporal_address):
 
 
 def test_starter_reports_unreachable_temporal_without_details():
-    from deca_soar.gateway.service import DeliveryError
+    from hypersoar.gateway.service import DeliveryError
 
     starter = TemporalStarter(TemporalSettings(f"127.0.0.1:{_free_port()}", NS, "q", KEY))
     try:

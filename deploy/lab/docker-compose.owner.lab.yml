@@ -1,5 +1,5 @@
 # Lab only: lets the owner job of deploy/deca/docker-compose.owner.yml reach the lab's Postgres container
-# and verify its certificate. Used through deca-owner-run.sh with DECA_OWNER_COMPOSE_OVERRIDE set to this
+# and verify its certificate. Used through deca-owner-run.sh with HYPERSOAR_OWNER_COMPOSE_OVERRIDE set to this
 # file; the owner DSN still only ever lives in the runner's tmpfs file (review N2).
 services:
   owner-job:

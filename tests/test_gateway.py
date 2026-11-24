@@ -1,5 +1,5 @@
-from deca_soar import ledger
-from deca_soar.gateway.service import MAX_ATTEMPTS, DeliveryError, forward_once
+from hypersoar import ledger
+from hypersoar.gateway.service import MAX_ATTEMPTS, DeliveryError, forward_once
 
 from helpers import ingest, waf_alert, write_ndjson
 

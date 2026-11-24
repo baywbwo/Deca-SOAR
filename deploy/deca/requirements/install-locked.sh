@@ -1,5 +1,5 @@
 #!/bin/sh
-# Hash-locked install of DECA SOAR into a fresh venv (review N3). The Dockerfile runs exactly this,
+# Hash-locked install of HyperSoar into a fresh venv (review N3). The Dockerfile runs exactly this,
 # and so does the local check before a build, so what is tested is what ships.
 #   install-locked.sh <python> <venv-dir> <source-dir> [--dev]
 # Every third-party package comes from a *.lock file pinned with ==, verified by sha256
@@ -20,5 +20,5 @@ trap 'rm -rf "$BUILD"' EXIT
 "$PY" -m venv "$VENV"
 if [ "$DEV" = "--dev" ]; then LOCK=$REQ/dev.lock; else LOCK=$REQ/runtime.lock; fi
 "$VENV/bin/pip" install $PIP -r "$LOCK"
-"$VENV/bin/pip" install --no-cache-dir --disable-pip-version-check --no-deps --no-index "$BUILD"/wheel/deca_soar-*.whl
+"$VENV/bin/pip" install --no-cache-dir --disable-pip-version-check --no-deps --no-index "$BUILD"/wheel/hypersoar-*.whl
 "$VENV/bin/pip" check

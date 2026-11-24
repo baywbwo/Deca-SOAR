@@ -1,7 +1,7 @@
 import psycopg
 import pytest
 
-from deca_soar import ledger
+from hypersoar import ledger
 
 
 def _fill(conn, n=5):

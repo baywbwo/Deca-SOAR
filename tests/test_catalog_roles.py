@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from deca_soar.broker import catalog, roles
-from deca_soar.broker.roles import Principal
+from hypersoar.broker import catalog, roles
+from hypersoar.broker.roles import Principal
 
 POLICY = Path(__file__).resolve().parents[1] / "policy"
 

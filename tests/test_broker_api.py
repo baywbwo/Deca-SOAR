@@ -4,20 +4,20 @@ import secrets
 import pytest
 from fastapi.testclient import TestClient
 
-from deca_soar import ledger
-from deca_soar.broker import service
-from deca_soar.common.config import ConfigError
+from hypersoar import ledger
+from hypersoar.broker import service
+from hypersoar.common.config import ConfigError
 
 from helpers import ingest, waf_alert
 
 
 @pytest.fixture
 def env(monkeypatch, settings, roles):
-    monkeypatch.setenv("DECA_DB_URL", roles["broker"])
-    monkeypatch.setenv("DECA_VAULT_PRIVATE_KEY", settings.vault_private_key.hex())
-    monkeypatch.setenv("DECA_ALLOW_TEST_NETS", "1")
-    monkeypatch.setenv("DECA_POLICY_DIR", str(settings.policy_dir))
-    for n in ("ALIBABA_CLOUD_ACCESS_KEY_ID", "DECA_ENV"):
+    monkeypatch.setenv("HYPERSOAR_DB_URL", roles["broker"])
+    monkeypatch.setenv("HYPERSOAR_VAULT_PRIVATE_KEY", settings.vault_private_key.hex())
+    monkeypatch.setenv("HYPERSOAR_ALLOW_TEST_NETS", "1")
+    monkeypatch.setenv("HYPERSOAR_POLICY_DIR", str(settings.policy_dir))
+    for n in ("ALIBABA_CLOUD_ACCESS_KEY_ID", "HYPERSOAR_ENV"):
         monkeypatch.delenv(n, raising=False)
     return monkeypatch
 
@@ -37,7 +37,7 @@ def principals(conn):
 
 @pytest.fixture
 def client(env, principals):
-    from deca_soar.broker.app import app
+    from hypersoar.broker.app import app
     with TestClient(app) as c:
         yield c
 
@@ -102,7 +102,7 @@ def test_protected_target_rejected(client, principals, pool, settings, tmp_path,
 
 def test_target_must_come_from_evidence(client, principals, waf, settings):
     aid, _ = waf
-    from deca_soar.common.pii import Tokenizer
+    from hypersoar.common.pii import Tokenizer
     forged = Tokenizer(settings.tokenization_key).token("ip", "203.0.113.200")
     j = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                     json=body(aid, params={"ip_token": forged, "waf_instance": "w1"})).json()
@@ -204,15 +204,15 @@ def test_unknown_alert_and_bad_body(client, principals):
 
 def test_refuses_to_start_with_write_credentials(env, principals):
     env.setenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "x")
-    from deca_soar.broker.app import app
+    from hypersoar.broker.app import app
     with pytest.raises(ConfigError):
         with TestClient(app):
             pass
 
 
 def test_refuses_production_with_placeholder_allowlist(env, principals):
-    env.setenv("DECA_ENV", "production")
-    from deca_soar.broker.app import app
+    env.setenv("HYPERSOAR_ENV", "production")
+    from hypersoar.broker.app import app
     with pytest.raises(ConfigError):
         with TestClient(app):
             pass

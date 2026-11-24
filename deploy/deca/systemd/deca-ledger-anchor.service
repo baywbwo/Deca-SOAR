@@ -1,5 +1,5 @@
 [Unit]
-Description=DECA SOAR: anchor the audit ledger head (append-only anchor file)
+Description=HyperSoar: anchor the audit ledger head (append-only anchor file)
 After=docker.service
 Requires=docker.service
 

@@ -42,17 +42,17 @@ PLACEHOLDER = "python:3.12-slim-bookworm@sha256:REPLACE_WITH_PINNED_DIGEST"
 
 def test_n3_placeholder_digest_fails_in_production(pf, tmp_path):
     pf.base_image(True, None, _dockerfile(tmp_path, PLACEHOLDER))
-    assert _status(pf, "DECA_BASE_IMAGE pinned") == ["FAIL"]
+    assert _status(pf, "HYPERSOAR_BASE_IMAGE pinned") == ["FAIL"]
 
 
 def test_n3_placeholder_digest_only_warns_outside_production(pf, tmp_path):
     pf.base_image(False, None, _dockerfile(tmp_path, PLACEHOLDER))
-    assert _status(pf, "DECA_BASE_IMAGE pinned") == ["WARN"]
+    assert _status(pf, "HYPERSOAR_BASE_IMAGE pinned") == ["WARN"]
 
 
 def test_n3_repo_dockerfile_default_is_pinned(pf):
     pf.base_image(True, None)
-    assert _status(pf, "DECA_BASE_IMAGE pinned") == ["PASS"]
+    assert _status(pf, "HYPERSOAR_BASE_IMAGE pinned") == ["PASS"]
 
 
 @pytest.mark.parametrize("value,expect", [
@@ -63,14 +63,14 @@ def test_n3_repo_dockerfile_default_is_pinned(pf):
     ("python:3.12-slim-bookworm@sha256:" + "ab" * 31, "FAIL"),
 ])
 def test_n3_digest_from_production_env(pf, tmp_path, value, expect):
-    pf.base_image(True, _env(tmp_path, f"DECA_BASE_IMAGE={value}\n"))
-    assert _status(pf, "DECA_BASE_IMAGE pinned") == [expect]
+    pf.base_image(True, _env(tmp_path, f"HYPERSOAR_BASE_IMAGE={value}\n"))
+    assert _status(pf, "HYPERSOAR_BASE_IMAGE pinned") == [expect]
 
 
 def test_n3_production_flag_is_implied_by_env(pf, tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("sys.argv", ["preflight", "--env", str(_env(tmp_path, f"DECA_BIND_IP=10.0.0.9\nDECA_BASE_IMAGE={PLACEHOLDER}\n"))])
+    monkeypatch.setattr("sys.argv", ["preflight", "--env", str(_env(tmp_path, f"HYPERSOAR_BIND_IP=10.0.0.9\nHYPERSOAR_BASE_IMAGE={PLACEHOLDER}\n"))])
     assert pf.main() == 1
-    assert "FAIL  image: DECA_BASE_IMAGE pinned by sha256 digest" in capsys.readouterr().out
+    assert "FAIL  image: HYPERSOAR_BASE_IMAGE pinned by sha256 digest" in capsys.readouterr().out
 
 
 # N3: hash locks -----------------------------------------------------------------------------------

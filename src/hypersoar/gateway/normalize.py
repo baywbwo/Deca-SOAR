@@ -1,4 +1,4 @@
-"""Normalise a raw detection result into the DECA alert schema (design 7.1), tokenising PII."""
+"""Normalise a raw detection result into the HyperSoar alert schema (design 7.1), tokenising PII."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from deca_soar.common.pii import Tokenizer, mask_access_key, tokens_in
+from hypersoar.common.pii import Tokenizer, mask_access_key, tokens_in
 
 SEVERITIES = ("info", "low", "medium", "high", "critical")
 SOURCES = ("waf", "actiontrail", "sas", "internal")

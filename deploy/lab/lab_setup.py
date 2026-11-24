@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lab only: create the PKI, keys, DB logins and deca.env for one DECA SOAR lab host.
+"""Lab only: create the PKI, keys, DB logins and deca.env for one HyperSoar lab host.
 
 Runs once, as root inside the deca-soar image (it needs `cryptography`), with /etc/deca-soar and
 /var/lib/deca-soar bind-mounted. Reads one JSON object on stdin, generated on the operator's machine:
@@ -27,9 +27,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-ROOT = Path(os.environ.get("DECA_LAB_ROOT", "/etc/deca-soar"))
-DATA = Path(os.environ.get("DECA_LAB_DATA", "/var/lib/deca-soar"))
-SUBNET = ipaddress.ip_network(os.environ.get("DECA_LAB_SUBNET", "172.30.124.0/24"))
+ROOT = Path(os.environ.get("HYPERSOAR_LAB_ROOT", "/etc/deca-soar"))
+DATA = Path(os.environ.get("HYPERSOAR_LAB_DATA", "/var/lib/deca-soar"))
+SUBNET = ipaddress.ip_network(os.environ.get("HYPERSOAR_LAB_SUBNET", "172.30.124.0/24"))
 APP_UID = 10001       # deca-soar image
 TEMPORAL_UID = 10002  # deploy/lab/temporal.Dockerfile
 PG_UID = 70           # postgres:*-alpine

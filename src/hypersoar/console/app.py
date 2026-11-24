@@ -1,12 +1,12 @@
 """SOC console process (read-only). Run with uvicorn over TLS behind the tunnel connector:
 
-    uvicorn deca_soar.console.app:app --host 0.0.0.0 --port 8300 --no-proxy-headers \
+    uvicorn hypersoar.console.app:app --host 0.0.0.0 --port 8300 --no-proxy-headers \
         --ssl-certfile ... --ssl-keyfile ...
 
-Settings: DECA_DB_URL(_FILE) is a deca_soar_viewer login; DECA_CONSOLE_PASSWORD_HASH_FILE holds the
-scrypt hash from `deca-soar console-hash`; DECA_CONSOLE_USER (default `owner`);
-DECA_CONSOLE_TRUSTED_PROXIES lists the connector's addresses whose CF-Connecting-IP is believed;
-DECA_CONSOLE_SYNTHETIC=1 labels the data as synthetic; DECA_GIT_SHA is shown in the footer.
+Settings: HYPERSOAR_DB_URL(_FILE) is a deca_soar_viewer login; HYPERSOAR_CONSOLE_PASSWORD_HASH_FILE holds the
+scrypt hash from `hypersoar console-hash`; HYPERSOAR_CONSOLE_USER (default `owner`);
+HYPERSOAR_CONSOLE_TRUSTED_PROXIES lists the connector's addresses whose CF-Connecting-IP is believed;
+HYPERSOAR_CONSOLE_SYNTHETIC=1 labels the data as synthetic; HYPERSOAR_GIT_SHA is shown in the footer.
 """
 
 from __future__ import annotations
@@ -25,16 +25,16 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from starlette.concurrency import run_in_threadpool
 
-from deca_soar.common.config import ConfigError, _cidrs, read_secret
-from deca_soar.common.dbguard import assert_least_privilege_login
-from deca_soar.common.http import BodyLimit
-from deca_soar.console import queries
-from deca_soar.console.auth import LoginLimiter, PasswordHash, SessionStore, client_address
+from hypersoar.common.config import ConfigError, _cidrs, read_secret
+from hypersoar.common.dbguard import assert_least_privilege_login
+from hypersoar.common.http import BodyLimit
+from hypersoar.console import queries
+from hypersoar.console.auth import LoginLimiter, PasswordHash, SessionStore, client_address
 
-log = logging.getLogger("deca_soar.console")
+log = logging.getLogger("hypersoar.console")
 
 STATIC = Path(__file__).resolve().parent / "static"
-COOKIE = "__Host-deca_console"
+COOKIE = "__Host-hypersoar_console"
 MAX_BODY = 4096
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self';"
@@ -62,19 +62,19 @@ def _configure(conn) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    raw_hash = read_secret("DECA_CONSOLE_PASSWORD_HASH")
+    raw_hash = read_secret("HYPERSOAR_CONSOLE_PASSWORD_HASH")
     assert raw_hash is not None
     app.state.password = PasswordHash.parse(raw_hash)
-    app.state.user = os.environ.get("DECA_CONSOLE_USER", "owner").strip()
+    app.state.user = os.environ.get("HYPERSOAR_CONSOLE_USER", "owner").strip()
     if not app.state.user:
-        raise ConfigError("DECA_CONSOLE_USER must not be empty")
-    app.state.trusted = _cidrs(os.environ.get("DECA_CONSOLE_TRUSTED_PROXIES", ""))
-    app.state.synthetic = os.environ.get("DECA_CONSOLE_SYNTHETIC") == "1"
-    app.state.sha = os.environ.get("DECA_GIT_SHA", "unknown")[:40]
+        raise ConfigError("HYPERSOAR_CONSOLE_USER must not be empty")
+    app.state.trusted = _cidrs(os.environ.get("HYPERSOAR_CONSOLE_TRUSTED_PROXIES", ""))
+    app.state.synthetic = os.environ.get("HYPERSOAR_CONSOLE_SYNTHETIC") == "1"
+    app.state.sha = os.environ.get("HYPERSOAR_GIT_SHA", "unknown")[:40]
     app.state.sessions = SessionStore()
     app.state.limiter = LoginLimiter()
     app.state.ledger = queries.LedgerStatus()
-    db_url = read_secret("DECA_DB_URL")
+    db_url = read_secret("HYPERSOAR_DB_URL")
     pool = ConnectionPool(db_url, min_size=1, max_size=4, configure=_configure,
                           kwargs={"row_factory": dict_row, "autocommit": False}, open=True)
     try:
@@ -88,7 +88,7 @@ async def lifespan(app: FastAPI):
     pool.close()
 
 
-fastapi_app = FastAPI(title="DECA SOC Console", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+fastapi_app = FastAPI(title="HyperSoar Console", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @fastapi_app.middleware("http")
@@ -130,9 +130,9 @@ def _login_page(request: Request, status: int = 200, msg: str | None = None) -> 
     synthetic = '<p class="chip sample">Data sintetis</p>' if request.app.state.synthetic else ""
     body = f"""<!doctype html>
 <html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Masuk · DECA SOC Console</title><link rel="stylesheet" href="/static/console.css"></head>
+<title>Masuk · HyperSoar Console</title><link rel="stylesheet" href="/static/console.css"></head>
 <body class="login-body"><main class="login">
-<div class="brand"><span class="logo" aria-hidden="true">D</span><span class="t1">DECA</span><span class="t2">SOC Console</span></div>
+<div class="brand"><span class="logo" aria-hidden="true">H</span><span class="t1">HyperSoar</span><span class="t2">Console</span></div>
 {synthetic}
 <form method="post" action="/login" class="login-form">
 <h1>Masuk</h1>

@@ -2,9 +2,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from deca_soar.common.config import DEFAULT_INTERNAL_CIDRS, _cidrs
-from deca_soar.common.pii import TOKEN_RE, Tokenizer, Vault, tokens_in
-from deca_soar.gateway.normalize import NormalizeError, normalize
+from hypersoar.common.config import DEFAULT_INTERNAL_CIDRS, _cidrs
+from hypersoar.common.pii import TOKEN_RE, Tokenizer, Vault, tokens_in
+from hypersoar.gateway.normalize import NormalizeError, normalize
 
 KEY = b"\x01" * 32
 

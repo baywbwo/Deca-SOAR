@@ -1,5 +1,5 @@
 # enable-template
-# Temporal server 1.32.2 (MIT, self-hosted) for DECA SOAR. Rendered by the server from the environment;
+# Temporal server 1.32.2 (MIT, self-hosted) for HyperSoar. Rendered by the server from the environment;
 # check a rendering with `temporal-server -c <config dir> -e deca-production render-config` (preflight does).
 # Single node, PostgreSQL on RDS over verified TLS, mTLS on frontend and internode, archival off,
 # no Temporal Cloud. Required env is listed in deploy/temporal/temporal.env.example.

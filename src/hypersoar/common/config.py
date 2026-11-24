@@ -67,13 +67,13 @@ FORBIDDEN_WRITE_CREDENTIAL_ENV = (
     "ALIBABA_CLOUD_SECURITY_TOKEN",
     "ALICLOUD_ACCESS_KEY",
     "ALICLOUD_SECRET_KEY",
-    "DECA_SOAR_ACTOR_ROLE_ARN",
+    "HYPERSOAR_ACTOR_ROLE_ARN",
 )
 
 
 # Old symmetric vault key (gateway could decrypt everything) and the broker's private key:
 # neither may ever be present in the gateway's environment (review F5).
-GATEWAY_FORBIDDEN_ENV = ("DECA_VAULT_KEY", "DECA_VAULT_PRIVATE_KEY")
+GATEWAY_FORBIDDEN_ENV = ("HYPERSOAR_VAULT_KEY", "HYPERSOAR_VAULT_PRIVATE_KEY")
 
 
 def _present(name: str) -> bool:
@@ -92,13 +92,13 @@ class Settings:
 
     @classmethod
     def _common(cls) -> dict:
-        db_url = read_secret("DECA_DB_URL")
+        db_url = read_secret("HYPERSOAR_DB_URL")
         assert db_url is not None
         return {
             "db_url": db_url,
-            "vault_key_id": os.environ.get("DECA_VAULT_KEY_ID", "v2"),
-            "internal_cidrs": _cidrs(os.environ.get("DECA_INTERNAL_CIDRS", DEFAULT_INTERNAL_CIDRS)),
-            "policy_dir": Path(os.environ.get("DECA_POLICY_DIR", "policy")),
+            "vault_key_id": os.environ.get("HYPERSOAR_VAULT_KEY_ID", "v2"),
+            "internal_cidrs": _cidrs(os.environ.get("HYPERSOAR_INTERNAL_CIDRS", DEFAULT_INTERNAL_CIDRS)),
+            "policy_dir": Path(os.environ.get("HYPERSOAR_POLICY_DIR", "policy")),
         }
 
     @classmethod
@@ -109,13 +109,13 @@ class Settings:
             raise ConfigError("gateway must not hold a vault decryption key (found: " + ", ".join(bad) + ")")
         return cls(
             **cls._common(),
-            tokenization_key=read_key32("DECA_TOKENIZATION_KEY"),
-            vault_public_key=read_key32("DECA_VAULT_PUBLIC_KEY"),
+            tokenization_key=read_key32("HYPERSOAR_TOKENIZATION_KEY"),
+            vault_public_key=read_key32("HYPERSOAR_VAULT_PUBLIC_KEY"),
         )
 
     @classmethod
     def for_broker(cls) -> "Settings":
-        return cls(**cls._common(), vault_private_key=read_key32("DECA_VAULT_PRIVATE_KEY"))
+        return cls(**cls._common(), vault_private_key=read_key32("HYPERSOAR_VAULT_PRIVATE_KEY"))
 
 
 def assert_no_write_credentials() -> None:

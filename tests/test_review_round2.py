@@ -12,11 +12,11 @@ from fastapi.testclient import TestClient
 from psycopg import errors
 from psycopg.rows import dict_row
 
-from deca_soar import cli, ledger
-from deca_soar.common.config import ConfigError
-from deca_soar.common.dbguard import assert_least_privilege_login, login_problems
-from deca_soar.common.pii import vault_public_key
-from deca_soar.ledger.anchor import SinkError, SlsExport, open_sink
+from hypersoar import cli, ledger
+from hypersoar.common.config import ConfigError
+from hypersoar.common.dbguard import assert_least_privilege_login, login_problems
+from hypersoar.common.pii import vault_public_key
+from hypersoar.ledger.anchor import SinkError, SlsExport, open_sink
 
 from conftest import make_login
 from helpers import ingest, waf_alert
@@ -96,15 +96,15 @@ def test_n4_role_attributes_refused(pg_server, roles):
 
 
 def test_n4_broker_refuses_to_start_with_owner_dsn(env, principals, settings):
-    env.setenv("DECA_DB_URL", settings.db_url)  # the superuser that owns everything in tests
-    from deca_soar.broker.app import app
+    env.setenv("HYPERSOAR_DB_URL", settings.db_url)  # the superuser that owns everything in tests
+    from hypersoar.broker.app import app
     with pytest.raises(ConfigError, match="refusing to start"):
         with TestClient(app):
             pass
 
 
 def test_n4_broker_starts_with_broker_login(env, principals):
-    from deca_soar.broker.app import app
+    from hypersoar.broker.app import app
     with TestClient(app) as c:
         assert c.get("/healthz").status_code == 200
         assert c.get("/v1/whoami", headers=principals["viewer1"]).status_code == 200
@@ -112,10 +112,10 @@ def test_n4_broker_starts_with_broker_login(env, principals):
 
 @pytest.mark.parametrize("which", ["owner", "broker"])
 def test_n4_gateway_refuses_to_start_with_wrong_dsn(monkeypatch, settings, roles, which):
-    monkeypatch.setenv("DECA_DB_URL", settings.db_url if which == "owner" else roles["broker"])
-    monkeypatch.setenv("DECA_TOKENIZATION_KEY", (b"\x01" * 32).hex())
-    monkeypatch.setenv("DECA_VAULT_PUBLIC_KEY", vault_public_key(b"\x02" * 32).hex())
-    from deca_soar.gateway.app import app
+    monkeypatch.setenv("HYPERSOAR_DB_URL", settings.db_url if which == "owner" else roles["broker"])
+    monkeypatch.setenv("HYPERSOAR_TOKENIZATION_KEY", (b"\x01" * 32).hex())
+    monkeypatch.setenv("HYPERSOAR_VAULT_PUBLIC_KEY", vault_public_key(b"\x02" * 32).hex())
+    from hypersoar.gateway.app import app
     with pytest.raises(ConfigError, match="refusing to start"):
         with TestClient(app):
             pass
@@ -123,7 +123,7 @@ def test_n4_gateway_refuses_to_start_with_wrong_dsn(monkeypatch, settings, roles
 
 @pytest.mark.parametrize("which", ["owner", "gateway"])
 def test_n4_anchor_job_refuses_wrong_dsn(monkeypatch, settings, roles, tmp_path, capsys, which):
-    monkeypatch.setenv("DECA_DB_URL", settings.db_url if which == "owner" else roles["gateway"])
+    monkeypatch.setenv("HYPERSOAR_DB_URL", settings.db_url if which == "owner" else roles["gateway"])
     assert cli.main(["anchor-ledger", "--sink", f"file:{tmp_path / 'a.ndjson'}"]) == 2
     assert "refusing to start" in capsys.readouterr().err
     assert not (tmp_path / "a.ndjson").exists()
@@ -197,7 +197,7 @@ def test_n2_sls_export_rejects_unrecognised_items(tmp_path, text, msg):
 def test_n2_offhost_copy_catches_root_rewrite(pool, settings, tmp_path, conn, roles, monkeypatch, capsys):
     """Root on the host rewrites the ledger AND the local anchor file; only the shipped copy disagrees."""
     ingest(pool, settings, tmp_path, [waf_alert(), waf_alert(ip="203.0.113.51")])
-    monkeypatch.setenv("DECA_DB_URL", roles["auditor"])
+    monkeypatch.setenv("HYPERSOAR_DB_URL", roles["auditor"])
     host = tmp_path / "ledger-anchors.ndjson"
     export = tmp_path / "sls-export.json"
     assert cli.main(["anchor-ledger", "--sink", f"file:{host}"]) == 0
@@ -217,7 +217,7 @@ def test_n2_offhost_copy_catches_root_rewrite(pool, settings, tmp_path, conn, ro
 
 
 def test_n2_verify_needs_an_anchored_head(roles, monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("DECA_DB_URL", roles["auditor"])
+    monkeypatch.setenv("HYPERSOAR_DB_URL", roles["auditor"])
     (tmp_path / "empty.ndjson").write_text("")
     assert cli.main(["verify-ledger", "--anchors", f"sls-export:{tmp_path / 'empty.ndjson'}"]) == 1
     assert any("no anchored head" in e for e in json.loads(capsys.readouterr().out)["errors"])
@@ -235,7 +235,7 @@ def owner_run(tmp_path):
     seen = tmp_path / "seen"
     fake = bin_dir / "docker"
     fake.write_text(f"""#!/bin/sh
-f="$DECA_OWNER_DSN_FILE"
+f="$HYPERSOAR_OWNER_DSN_FILE"
 {{ echo "args=$*"; echo "mode=$(stat -c %a "$f")"; echo "dirmode=$(stat -c %a "$(dirname "$f")")"
    echo "content=$(cat "$f")"; echo "file=$f"; }} > {seen}
 exit "${{FAKE_DOCKER_RC:-0}}"
@@ -245,8 +245,8 @@ exit "${{FAKE_DOCKER_RC:-0}}"
     shm.mkdir()
     secrets = tmp_path / "secrets"
     secrets.mkdir()
-    base = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "DECA_OWNER_TMPDIR": str(shm),
-            "DECA_SECRETS_DIR": str(secrets), "DECA_ENV_FILE": str(tmp_path / "deca.env")}
+    base = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "HYPERSOAR_OWNER_TMPDIR": str(shm),
+            "HYPERSOAR_SECRETS_DIR": str(secrets), "HYPERSOAR_ENV_FILE": str(tmp_path / "deca.env")}
 
     def run(*args, stdin=DSN + "\n", **env):
         r = subprocess.run(["sh", str(OWNER_RUN), *args], input=stdin, capture_output=True, text=True,
@@ -262,7 +262,7 @@ def test_n2_owner_dsn_exists_only_during_the_job(owner_run):
     r, got = owner_run("migrate")
     assert r.returncode == 0, r.stderr
     assert got["content"] == DSN and got["mode"] == "400" and got["dirmode"] == "700"
-    assert "docker-compose.owner.yml" in got["args"] and got["args"].endswith("run --rm owner-job deca-soar migrate")
+    assert "docker-compose.owner.yml" in got["args"] and got["args"].endswith("run --rm owner-job hypersoar migrate")
     assert Path(got["file"]).parent.parent == owner_run.shm
     assert list(owner_run.shm.iterdir()) == []  # removed after the run
     assert "n2-test-pw" not in r.stdout + r.stderr

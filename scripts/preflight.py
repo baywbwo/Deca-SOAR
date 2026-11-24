@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-DECA_COMPOSE = ROOT / "deploy/deca/docker-compose.yml"
+HYPERSOAR_COMPOSE = ROOT / "deploy/deca/docker-compose.yml"
 OWNER_COMPOSE = ROOT / "deploy/deca/docker-compose.owner.yml"
 OWNER_RUN = ROOT / "deploy/deca/bin/deca-owner-run.sh"
 LOGTAIL_CONFIG = ROOT / "deploy/deca/sls/ledger-anchor.logtail.yaml"
@@ -40,7 +40,7 @@ PKI_CLIENT_CERTS = ("tls/temporal-gateway.pem", "tls/temporal-worker.pem", "temp
 CLIENT_CERT_MAX_DAYS = 90
 TEMPORAL_DIR = ROOT / "deploy/temporal"
 RETIRED_ENGINE = "trace" + "cat"  # the phase-0 engine this build replaced; must not come back
-WRITE_CREDENTIALS = ("ALIBABA_CLOUD_ACCESS_KEY", "ALICLOUD_ACCESS_KEY", "ALICLOUD_SECRET_KEY", "DECA_SOAR_ACTOR_ROLE_ARN")
+WRITE_CREDENTIALS = ("ALIBABA_CLOUD_ACCESS_KEY", "ALICLOUD_ACCESS_KEY", "ALICLOUD_SECRET_KEY", "HYPERSOAR_ACTOR_ROLE_ARN")
 # Which secrets each service may hold (least privilege, review F3/F5). The owner DSN is in none of them (N2).
 SECRET_ALLOWLIST = {
     "broker": {"deca_db_url_broker", "deca_vault_private_key", "broker_tls_cert", "broker_tls_key"},
@@ -95,17 +95,17 @@ def static_repo() -> None:
 
 
 def static_deca_compose() -> None:
-    doc = yaml.safe_load(DECA_COMPOSE.read_text())
+    doc = yaml.safe_load(HYPERSOAR_COMPOSE.read_text())
     svcs = doc["services"]
     check(set(svcs) == set(SECRET_ALLOWLIST), f"deca compose: services are exactly {sorted(SECRET_ALLOWLIST)}")
     for name, s in svcs.items():
         img = str(s.get("image", ""))
-        check(img.startswith("${DECA_SOAR_IMAGE:?"), f"deca compose: {name} image is the required pinned variable")
+        check(img.startswith("${HYPERSOAR_IMAGE:?"), f"deca compose: {name} image is the required pinned variable")
         check(s.get("read_only") is True, f"deca compose: {name} read-only root fs")
         check(s.get("cap_drop") == ["ALL"], f"deca compose: {name} drops all capabilities")
         check("no-new-privileges:true" in (s.get("security_opt") or []), f"deca compose: {name} no-new-privileges")
         env = s.get("environment") or {}
-        check(env.get("DECA_ENV") == "production", f"deca compose: {name} DECA_ENV=production")
+        check(env.get("HYPERSOAR_ENV") == "production", f"deca compose: {name} HYPERSOAR_ENV=production")
         check(not any(k.startswith(WRITE_CREDENTIALS) for k in env), f"deca compose: {name} has no Alibaba write credential")
         check(not any(v for k, v in env.items() if not k.endswith("_FILE") and re.search(r"(KEY|TOKEN|PASSWORD|DB_URL)$", k)),
               f"deca compose: {name} passes secrets as files only")
@@ -114,22 +114,22 @@ def static_deca_compose() -> None:
         check(not extra, f"deca compose: {name} holds only its own secrets" + (f" (extra: {sorted(extra)})" if extra else ""))
         ports = s.get("ports") or []
         if name == "broker":
-            check(len(ports) == 1 and str(ports[0]).startswith("${DECA_BIND_IP:?"),
-                  "deca compose: broker publishes only on ${DECA_BIND_IP}")
+            check(len(ports) == 1 and str(ports[0]).startswith("${HYPERSOAR_BIND_IP:?"),
+                  "deca compose: broker publishes only on ${HYPERSOAR_BIND_IP}")
             cmd = s.get("command") or []
             check("--ssl-certfile" in cmd and "--ssl-keyfile" in cmd, "deca compose: broker serves TLS")
         else:
             check(not ports, f"deca compose: {name} publishes no host port")
     w = svcs["worker"]["environment"]
-    check(str(w.get("DECA_BROKER_URL", "")).startswith("${DECA_BROKER_URL:?https://"), "deca compose: worker -> broker over https")
+    check(str(w.get("HYPERSOAR_BROKER_URL", "")).startswith("${HYPERSOAR_BROKER_URL:?https://"), "deca compose: worker -> broker over https")
     for name in ("gateway", "worker"):
         env = svcs[name]["environment"]
-        check(all(env.get(k) for k in ("DECA_TEMPORAL_TLS_CA_FILE", "DECA_TEMPORAL_TLS_CERT_FILE", "DECA_TEMPORAL_TLS_KEY_FILE")),
+        check(all(env.get(k) for k in ("HYPERSOAR_TEMPORAL_TLS_CA_FILE", "HYPERSOAR_TEMPORAL_TLS_CERT_FILE", "HYPERSOAR_TEMPORAL_TLS_KEY_FILE")),
               f"deca compose: {name} uses mTLS to Temporal")
-        check(bool(env.get("DECA_TEMPORAL_PAYLOAD_KEY_FILE")), f"deca compose: {name} encrypts Temporal payloads")
+        check(bool(env.get("HYPERSOAR_TEMPORAL_PAYLOAD_KEY_FILE")), f"deca compose: {name} encrypts Temporal payloads")
 
 
-def static_owner_dsn(compose: Path = DECA_COMPOSE, owner_compose: Path = OWNER_COMPOSE, runner: Path = OWNER_RUN) -> None:
+def static_owner_dsn(compose: Path = HYPERSOAR_COMPOSE, owner_compose: Path = OWNER_COMPOSE, runner: Path = OWNER_RUN) -> None:
     """Review N2: the owner DSN is never a standing secret; it exists only for one owner job."""
     check("deca_db_url_owner" not in compose.read_text(), "deca compose: never references the owner DSN (N2)")
     doc = yaml.safe_load(owner_compose.read_text())
@@ -139,7 +139,7 @@ def static_owner_dsn(compose: Path = DECA_COMPOSE, owner_compose: Path = OWNER_C
     check(job.get("secrets") == ["deca_db_url_owner"] and list(doc.get("secrets") or {}) == ["deca_db_url_owner"],
           "owner compose: holds only the owner DSN")
     src = str(((doc.get("secrets") or {}).get("deca_db_url_owner") or {}).get("file", ""))
-    check(src.startswith("${DECA_OWNER_DSN_FILE:?"), "owner compose: owner DSN comes from the per-run temp file only")
+    check(src.startswith("${HYPERSOAR_OWNER_DSN_FILE:?"), "owner compose: owner DSN comes from the per-run temp file only")
     check(job.get("read_only") is True and job.get("cap_drop") == ["ALL"] and not job.get("ports"),
           "owner compose: owner-job hardened, no ports")
     sh = runner.read_text() if runner.exists() else ""
@@ -148,7 +148,7 @@ def static_owner_dsn(compose: Path = DECA_COMPOSE, owner_compose: Path = OWNER_C
           "owner runner: tmpfs file, removed on exit, refuses a stored owner DSN")
 
 
-def static_anchor_shipping(compose: Path = DECA_COMPOSE, logtail: Path = LOGTAIL_CONFIG, timer: Path = ANCHOR_TIMER) -> None:
+def static_anchor_shipping(compose: Path = HYPERSOAR_COMPOSE, logtail: Path = LOGTAIL_CONFIG, timer: Path = ANCHOR_TIMER) -> None:
     """Review N2: every anchor line leaves the host (Logtail -> SLS)."""
     job = yaml.safe_load(compose.read_text())["services"].get("ledger-anchor") or {}
     check(f"file:{ANCHOR_FILE}" in (job.get("command") or []), "anchor job: writes the shipped anchor file")
@@ -281,9 +281,9 @@ def base_image(production: bool, deca_env: Path | None, dockerfile: Path = ROOT 
     m = re.search(r"^ARG BASE_IMAGE=(\S+)", dockerfile.read_text(), re.M)
     value = m.group(1) if m else ""
     if deca_env is not None:
-        value = parse_env(deca_env).get("DECA_BASE_IMAGE", value)
+        value = parse_env(deca_env).get("HYPERSOAR_BASE_IMAGE", value)
     ok = bool(DIGEST_RE.match(value)) and "REPLACE" not in value
-    check(ok, "image: DECA_BASE_IMAGE pinned by sha256 digest" + ("" if production else " (fill in at build time)"),
+    check(ok, "image: HYPERSOAR_BASE_IMAGE pinned by sha256 digest" + ("" if production else " (fill in at build time)"),
           warn=not production)
 
 
@@ -415,9 +415,9 @@ def env_files(deca: Path | None, temporal: Path | None) -> None:
         check(not any(k.startswith("PG") for k in env), f"{label}: no libpq PG* variables (N8)")
     if deca:
         env = parse_env(deca)
-        check(_private_ip(env.get("DECA_BIND_IP", "")), "deca env: DECA_BIND_IP is a private, non-wildcard address")
-        check(env.get("DECA_BROKER_URL", "").startswith("https://"), "deca env: DECA_BROKER_URL is https")
-        host = env.get("DECA_TEMPORAL_ADDRESS", "").rsplit(":", 1)[0].strip("[]")
+        check(_private_ip(env.get("HYPERSOAR_BIND_IP", "")), "deca env: HYPERSOAR_BIND_IP is a private, non-wildcard address")
+        check(env.get("HYPERSOAR_BROKER_URL", "").startswith("https://"), "deca env: HYPERSOAR_BROKER_URL is https")
+        host = env.get("HYPERSOAR_TEMPORAL_ADDRESS", "").rsplit(":", 1)[0].strip("[]")
         try:
             check(not ipaddress.ip_address(host).is_global, "deca env: Temporal address is not a public IP")
         except ValueError:
@@ -508,7 +508,7 @@ def main() -> int:
         secrets_dir(a.secrets_dir)
     if a.pki_root:
         pki(a.pki_root, a.operator_cert)
-    owner_leftovers(Path(os.environ.get("DECA_OWNER_TMPDIR", "/dev/shm")))
+    owner_leftovers(Path(os.environ.get("HYPERSOAR_OWNER_TMPDIR", "/dev/shm")))
     for status, msg in results:
         if status != "PASS" or os.environ.get("PREFLIGHT_VERBOSE"):
             print(f"{status}  {msg}")

@@ -50,8 +50,8 @@ def test_console_is_read_only_and_only_tunnel_is_trusted():
     assert set(con["secrets"]) == {"deca_db_url_console", "deca_db_ca", "console_password_hash",
                                    "console_tls_cert", "console_tls_key"}
     tunnel_ip = tun["networks"]["deca"]["ipv4_address"]
-    assert con["environment"]["DECA_CONSOLE_TRUSTED_PROXIES"] == f"{tunnel_ip}/32"
-    assert con["environment"]["DECA_CONSOLE_SYNTHETIC"] == "1"
+    assert con["environment"]["HYPERSOAR_CONSOLE_TRUSTED_PROXIES"] == f"{tunnel_ip}/32"
+    assert con["environment"]["HYPERSOAR_CONSOLE_SYNTHETIC"] == "1"
     assert "--no-proxy-headers" in con["command"]
     assert tun["command"][tun["command"].index("--url") + 1] == "https://console:8300"
     assert "--origin-ca-pool" in tun["command"]

@@ -1,4 +1,4 @@
--- DECA SOAR phase 0 schema: gateway inbox, token vault, broker, audit ledger.
+-- HyperSoar phase 0 schema: gateway inbox, token vault, broker, audit ledger.
 
 CREATE SCHEMA IF NOT EXISTS gateway;
 CREATE SCHEMA IF NOT EXISTS vault;

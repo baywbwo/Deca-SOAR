@@ -1,10 +1,10 @@
-# DECA SOAR image for gateway, Temporal worker, broker and jobs (phase 0). Build from the repo root:
+# HyperSoar image for gateway, Temporal worker, broker and jobs (phase 0). Build from the repo root:
 #   docker build -f deploy/deca/Dockerfile \
-#     --build-arg BASE_IMAGE=python:3.12-slim-bookworm@sha256:<digest> -t deca-soar:<git-sha> .
+#     --build-arg BASE_IMAGE=python:3.12-slim-bookworm@sha256:<digest> -t hypersoar:<git-sha> .
 # The base image must be pinned by digest (review N3): the build stops if BASE_IMAGE is not
 # <image>@sha256:<64 hex>, and scripts/preflight.py --production fails on it too. The default below is
 # the linux/amd64 python:3.12-slim-bookworm index digest pulled for the lab build on 2026-11-24; bump it
-# deliberately (pull, scan, then edit). Record the digest used as DECA_BASE_IMAGE in
+# deliberately (pull, scan, then edit). Record the digest used as HYPERSOAR_BASE_IMAGE in
 # /etc/deca-soar/deca.env (RUNBOOK section 5).
 ARG BASE_IMAGE=python:3.12-slim-bookworm@sha256:82836454a795d9d75549a9e157fd08dbac6c383292cf89e99f4248a97ce6b2ff
 
@@ -24,8 +24,8 @@ COPY --from=build /opt/venv /opt/venv
 COPY migrations /app/migrations
 COPY policy /app/policy
 ENV PATH=/opt/venv/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    DECA_MIGRATIONS_DIR=/app/migrations DECA_POLICY_DIR=/app/policy
+    HYPERSOAR_MIGRATIONS_DIR=/app/migrations HYPERSOAR_POLICY_DIR=/app/policy
 WORKDIR /app
 USER 10001:10001
 # Overridden per service in docker-compose.yml.
-CMD ["uvicorn", "deca_soar.broker.app:app", "--host", "0.0.0.0", "--port", "8100", "--no-server-header"]
+CMD ["uvicorn", "hypersoar.broker.app:app", "--host", "0.0.0.0", "--port", "8100", "--no-server-header"]

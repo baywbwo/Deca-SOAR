@@ -13,21 +13,21 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from deca_soar.common.config import Settings
-from deca_soar.common.db import make_pool
-from deca_soar.common.dbguard import assert_least_privilege_login
-from deca_soar.gateway.service import Deliver, forward_once, pull_once
-from deca_soar.gateway.sources import ReplayFileSource
-from deca_soar.gateway.starter import TemporalStarter
-from deca_soar.workflows.config import TemporalSettings
+from hypersoar.common.config import Settings
+from hypersoar.common.db import make_pool
+from hypersoar.common.dbguard import assert_least_privilege_login
+from hypersoar.gateway.service import Deliver, forward_once, pull_once
+from hypersoar.gateway.sources import ReplayFileSource
+from hypersoar.gateway.starter import TemporalStarter
+from hypersoar.workflows.config import TemporalSettings
 
-log = logging.getLogger("deca_soar.gateway")
+log = logging.getLogger("hypersoar.gateway")
 
 
 def build_source():
-    kind = os.environ.get("DECA_GATEWAY_SOURCE", "replay")
+    kind = os.environ.get("HYPERSOAR_GATEWAY_SOURCE", "replay")
     if kind == "replay":
-        return ReplayFileSource(Path(os.environ["DECA_REPLAY_FILE"]), name=os.environ.get("DECA_SOURCE_NAME", "replay"))
+        return ReplayFileSource(Path(os.environ["HYPERSOAR_REPLAY_FILE"]), name=os.environ.get("HYPERSOAR_SOURCE_NAME", "replay"))
     raise RuntimeError(f"unsupported source {kind!r} (SLS source is phase 1)")
 
 
@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
     stop = threading.Event()
     t = threading.Thread(
         target=run_loop,
-        args=(stop, pool, settings, build_source(), starter, float(os.environ.get("DECA_PULL_INTERVAL_S", "15"))),
+        args=(stop, pool, settings, build_source(), starter, float(os.environ.get("HYPERSOAR_PULL_INTERVAL_S", "15"))),
         name="gateway-loop",
         daemon=True,
     )
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
     pool.close()
 
 
-app = FastAPI(title="DECA SOAR Ingest Gateway", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="HyperSoar Ingest Gateway", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.get("/healthz")

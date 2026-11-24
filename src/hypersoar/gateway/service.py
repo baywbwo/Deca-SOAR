@@ -9,11 +9,11 @@ from datetime import UTC, datetime, timedelta
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from deca_soar import ledger
-from deca_soar.common.config import Settings
-from deca_soar.common.pii import Tokenizer, VaultWriter
-from deca_soar.gateway.normalize import NormalizeError, normalize
-from deca_soar.gateway.sources import AlertSource
+from hypersoar import ledger
+from hypersoar.common.config import Settings
+from hypersoar.common.pii import Tokenizer, VaultWriter
+from hypersoar.gateway.normalize import NormalizeError, normalize
+from hypersoar.gateway.sources import AlertSource
 
 ACTOR = "service:gateway"
 MAX_ATTEMPTS = 12

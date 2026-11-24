@@ -41,11 +41,11 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 REPO = Path(__file__).resolve().parents[1]
-TOOLS = Path(os.environ.get("DECA_E2E_TOOLS", "/data/work/tools/soar-deps"))
-PG_BIN = Path(os.environ.get("DECA_E2E_PG_BIN", TOOLS / "pg18v/bin"))
-TEMPORAL_BIN_DIR = Path(os.environ.get("DECA_E2E_TEMPORAL_BIN_DIR", "/data/work/tools/temporal-server-1.32.2"))
-TEMPORAL_CLI = Path(os.environ.get("DECA_E2E_TEMPORAL_CLI", TOOLS / "temporal"))
-DECA_PY = REPO / ".venv/bin/python"
+TOOLS = Path(os.environ.get("HYPERSOAR_E2E_TOOLS", "/data/work/tools/soar-deps"))
+PG_BIN = Path(os.environ.get("HYPERSOAR_E2E_PG_BIN", TOOLS / "pg18v/bin"))
+TEMPORAL_BIN_DIR = Path(os.environ.get("HYPERSOAR_E2E_TEMPORAL_BIN_DIR", "/data/work/tools/temporal-server-1.32.2"))
+TEMPORAL_CLI = Path(os.environ.get("HYPERSOAR_E2E_TEMPORAL_CLI", TOOLS / "temporal"))
+HYPERSOAR_PY = REPO / ".venv/bin/python"
 TBIN = REPO / "deploy/temporal/bin"
 
 HOST = "127.0.73.1"                 # private loopback address: nothing binds a wildcard
@@ -352,7 +352,7 @@ def start_temporal(st: Stack, pki: PKI, tenv: dict, summary: dict) -> dict:
     op = {"TEMPORAL_CLI": str(TEMPORAL_CLI), "TEMPORAL_ADDRESS": f"{HOST}:{st.ports['temporal']}",
           "TEMPORAL_TLS_CERT": str(op_cert), "TEMPORAL_TLS_KEY": str(op_key),
           "TEMPORAL_TLS_CA": str(pki.ca_file("server")), "TEMPORAL_TLS_SERVER_NAME": TEMPORAL_NAME,
-          "DECA_TEMPORAL_NAMESPACE": NAMESPACE, "PATH": "/usr/bin:/bin", "HOME": str(st.run)}
+          "HYPERSOAR_TEMPORAL_NAMESPACE": NAMESPACE, "PATH": "/usr/bin:/bin", "HOME": str(st.run)}
 
     def ns():
         st.check_alive()
@@ -450,12 +450,12 @@ def mtls_probes(st: Stack, pki: PKI, summary: dict) -> None:
 # --------------------------------------------------------------------------------------------- DECA
 
 def deca_cli(st: Stack, env: dict, *args: str, ok=(0, 1)) -> dict:
-    r = subprocess.run([str(DECA_PY), "-m", "deca_soar.cli", *args], env=env, capture_output=True, text=True,
+    r = subprocess.run([str(HYPERSOAR_PY), "-m", "hypersoar.cli", *args], env=env, capture_output=True, text=True,
                        timeout=120)
     with (st.logs / "deca-cli.log").open("a") as f:
         f.write(r.stdout + r.stderr)
     if r.returncode not in ok:
-        raise RuntimeError(f"deca-soar {args[0]} failed ({r.returncode}): {r.stderr[-1500:]}")
+        raise RuntimeError(f"hypersoar {args[0]} failed ({r.returncode}): {r.stderr[-1500:]}")
     lines = r.stdout.strip().splitlines()
     return {"rc": r.returncode, **(json.loads(lines[-1]) if lines and lines[-1].startswith("{") else {})}
 
@@ -468,15 +468,15 @@ def owner_run(st: Stack, base: dict, owner_dsn: Path, *args: str) -> None:
         shim.mkdir(mode=0o700)
         (st.run / "owner-tmp").mkdir(mode=0o700)
         (shim / "docker").write_text(f"""#!/bin/sh
-# stand-in for: docker compose -f docker-compose.owner.yml --env-file F run --rm owner-job deca-soar ARGS
+# stand-in for: docker compose -f docker-compose.owner.yml --env-file F run --rm owner-job hypersoar ARGS
 while [ $# -gt 0 ] && [ "$1" != owner-job ]; do shift; done
 shift 2
-stat -c %a "$DECA_OWNER_DSN_FILE" >> {st.run}/owner-shim.modes
-DECA_DB_URL_FILE="$DECA_OWNER_DSN_FILE" exec {DECA_PY} -m deca_soar.cli "$@"
+stat -c %a "$HYPERSOAR_OWNER_DSN_FILE" >> {st.run}/owner-shim.modes
+HYPERSOAR_DB_URL_FILE="$HYPERSOAR_OWNER_DSN_FILE" exec {HYPERSOAR_PY} -m hypersoar.cli "$@"
 """)
         (shim / "docker").chmod(0o700)
-    env = {**base, "PATH": f"{shim}:{base['PATH']}", "DECA_OWNER_TMPDIR": str(st.run / "owner-tmp"),
-           "DECA_SECRETS_DIR": str(st.sec), "DECA_ENV_FILE": "/dev/null"}
+    env = {**base, "PATH": f"{shim}:{base['PATH']}", "HYPERSOAR_OWNER_TMPDIR": str(st.run / "owner-tmp"),
+           "HYPERSOAR_SECRETS_DIR": str(st.sec), "HYPERSOAR_ENV_FILE": "/dev/null"}
     r = subprocess.run(["sh", str(REPO / "deploy/deca/bin/deca-owner-run.sh"), *args], input=owner_dsn.read_text(),
                        env=env, capture_output=True, text=True, timeout=120)
     with (st.logs / "deca-cli.log").open("a") as f:
@@ -486,8 +486,8 @@ DECA_DB_URL_FILE="$DECA_OWNER_DSN_FILE" exec {DECA_PY} -m deca_soar.cli "$@"
 
 
 def setup_deca(st: Stack, pki: PKI, pg: dict) -> dict:
-    base = {"PATH": os.environ["PATH"], "HOME": str(st.run), "DECA_ENV": "e2e",
-            "DECA_POLICY_DIR": str(REPO / "policy"), "DECA_MIGRATIONS_DIR": str(REPO / "migrations")}
+    base = {"PATH": os.environ["PATH"], "HOME": str(st.run), "HYPERSOAR_ENV": "e2e",
+            "HYPERSOAR_POLICY_DIR": str(REPO / "policy"), "HYPERSOAR_MIGRATIONS_DIR": str(REPO / "migrations")}
     # The owner DSN lives in the operator's vault, not in the host secrets dir (review N2). The e2e keeps
     # it here so the guard probes and the F3/N2 rewrite can play an attacker who stole it.
     ops_vault = st.run / "ops-vault"
@@ -501,7 +501,7 @@ def setup_deca(st: Stack, pki: PKI, pg: dict) -> dict:
         "broker": st.secret_file("deca_db_url_broker", db_url(st, pki, "deca_brk", pg["brk"])),
         "auditor": st.secret_file("deca_db_url_auditor", db_url(st, pki, "deca_aud", pg["aud"])),
     }
-    owner = {**base, "DECA_DB_URL_FILE": str(urls["owner"])}
+    owner = {**base, "HYPERSOAR_DB_URL_FILE": str(urls["owner"])}
     owner_run(st, base, owner_dsn, "migrate")
     # RUNBOOK step 2: login users that are members of the NOLOGIN group roles the migration created.
     with psycopg.connect(st.run_admin, autocommit=True) as c:
@@ -527,23 +527,23 @@ def setup_deca(st: Stack, pki: PKI, pg: dict) -> dict:
     b_cert, b_key = pki.leaf("broker", ca=pki.server_ca, dns=["broker.deca.internal"], ips=[HOST], server=True)
     gw_cert, gw_key = pki.leaf("temporal-gateway", ca=pki.client_ca, server=False)
     wk_cert, wk_key = pki.leaf("temporal-worker", ca=pki.client_ca, server=False)
-    temporal = {"DECA_TEMPORAL_ADDRESS": f"{HOST}:{st.ports['temporal']}", "DECA_TEMPORAL_NAMESPACE": NAMESPACE,
-                "DECA_TEMPORAL_TLS_SERVER_NAME": TEMPORAL_NAME, "DECA_TEMPORAL_TLS_CA_FILE": str(pki.ca_file("server")),
-                "DECA_TEMPORAL_PAYLOAD_KEY_FILE": str(kf["deca_temporal_payload_key"])}
+    temporal = {"HYPERSOAR_TEMPORAL_ADDRESS": f"{HOST}:{st.ports['temporal']}", "HYPERSOAR_TEMPORAL_NAMESPACE": NAMESPACE,
+                "HYPERSOAR_TEMPORAL_TLS_SERVER_NAME": TEMPORAL_NAME, "HYPERSOAR_TEMPORAL_TLS_CA_FILE": str(pki.ca_file("server")),
+                "HYPERSOAR_TEMPORAL_PAYLOAD_KEY_FILE": str(kf["deca_temporal_payload_key"])}
     return {
         "owner": owner,
-        "auditor": {**base, "DECA_DB_URL_FILE": str(urls["auditor"])},
-        "broker": {**base, "DECA_DB_URL_FILE": str(urls["broker"]),
-                   "DECA_VAULT_PRIVATE_KEY_FILE": str(kf["deca_vault_private_key"]), "DECA_ALLOW_TEST_NETS": "1"},
+        "auditor": {**base, "HYPERSOAR_DB_URL_FILE": str(urls["auditor"])},
+        "broker": {**base, "HYPERSOAR_DB_URL_FILE": str(urls["broker"]),
+                   "HYPERSOAR_VAULT_PRIVATE_KEY_FILE": str(kf["deca_vault_private_key"]), "HYPERSOAR_ALLOW_TEST_NETS": "1"},
         "broker_tls": (b_cert, b_key),
-        "gateway": {**base, **temporal, "DECA_DB_URL_FILE": str(urls["gateway"]),
-                    "DECA_TOKENIZATION_KEY_FILE": str(kf["deca_tokenization_key"]),
-                    "DECA_VAULT_PUBLIC_KEY_FILE": str(kf["deca_vault_public_key"]),
-                    "DECA_TEMPORAL_TLS_CERT_FILE": str(gw_cert), "DECA_TEMPORAL_TLS_KEY_FILE": str(gw_key)},
-        "worker": {**base, **temporal, "DECA_TEMPORAL_TLS_CERT_FILE": str(wk_cert),
-                   "DECA_TEMPORAL_TLS_KEY_FILE": str(wk_key),
-                   "DECA_BROKER_URL": f"https://{HOST}:{st.ports['broker']}",
-                   "DECA_BROKER_TOKEN_FILE": str(tok_file), "DECA_BROKER_CA_FILE": str(pki.ca_file("server"))},
+        "gateway": {**base, **temporal, "HYPERSOAR_DB_URL_FILE": str(urls["gateway"]),
+                    "HYPERSOAR_TOKENIZATION_KEY_FILE": str(kf["deca_tokenization_key"]),
+                    "HYPERSOAR_VAULT_PUBLIC_KEY_FILE": str(kf["deca_vault_public_key"]),
+                    "HYPERSOAR_TEMPORAL_TLS_CERT_FILE": str(gw_cert), "HYPERSOAR_TEMPORAL_TLS_KEY_FILE": str(gw_key)},
+        "worker": {**base, **temporal, "HYPERSOAR_TEMPORAL_TLS_CERT_FILE": str(wk_cert),
+                   "HYPERSOAR_TEMPORAL_TLS_KEY_FILE": str(wk_key),
+                   "HYPERSOAR_BROKER_URL": f"https://{HOST}:{st.ports['broker']}",
+                   "HYPERSOAR_BROKER_TOKEN_FILE": str(tok_file), "HYPERSOAR_BROKER_CA_FILE": str(pki.ca_file("server"))},
         "worker_token_file": tok_file,
         "urls": urls,
     }
@@ -559,27 +559,27 @@ def guard_probes(st: Stack, pki: PKI, pg: dict, denv: dict, summary: dict) -> No
     port = free_port()
 
     def serve(app: str, env: dict) -> subprocess.CompletedProcess:
-        return subprocess.run([str(DECA_PY), "-m", "uvicorn", app, "--host", HOST, "--port", str(port)],
+        return subprocess.run([str(HYPERSOAR_PY), "-m", "uvicorn", app, "--host", HOST, "--port", str(port)],
                               env=env, cwd=REPO, capture_output=True, text=True, timeout=60)
 
     def refused(r: subprocess.CompletedProcess) -> bool:
         return r.returncode != 0 and "refusing to start" in (r.stdout + r.stderr)
 
     out = {
-        "broker_with_owner_dsn": refused(serve("deca_soar.broker.app:app",
-                                               {**denv["broker"], "DECA_DB_URL_FILE": str(urls["owner"])})),
-        "broker_with_gateway_dsn": refused(serve("deca_soar.broker.app:app",
-                                                 {**denv["broker"], "DECA_DB_URL_FILE": str(urls["gateway"])})),
-        "gateway_with_owner_dsn": refused(serve("deca_soar.gateway.app:app",
-                                                {**denv["gateway"], "DECA_DB_URL_FILE": str(urls["owner"])})),
-        "gateway_with_broker_dsn": refused(serve("deca_soar.gateway.app:app",
-                                                 {**denv["gateway"], "DECA_DB_URL_FILE": str(urls["broker"])})),
+        "broker_with_owner_dsn": refused(serve("hypersoar.broker.app:app",
+                                               {**denv["broker"], "HYPERSOAR_DB_URL_FILE": str(urls["owner"])})),
+        "broker_with_gateway_dsn": refused(serve("hypersoar.broker.app:app",
+                                                 {**denv["broker"], "HYPERSOAR_DB_URL_FILE": str(urls["gateway"])})),
+        "gateway_with_owner_dsn": refused(serve("hypersoar.gateway.app:app",
+                                                {**denv["gateway"], "HYPERSOAR_DB_URL_FILE": str(urls["owner"])})),
+        "gateway_with_broker_dsn": refused(serve("hypersoar.gateway.app:app",
+                                                 {**denv["gateway"], "HYPERSOAR_DB_URL_FILE": str(urls["broker"])})),
     }
-    r = serve("deca_soar.broker.app:app", {**denv["broker"], "DECA_DB_URL_FILE": str(switched)})
+    r = serve("hypersoar.broker.app:app", {**denv["broker"], "HYPERSOAR_DB_URL_FILE": str(switched)})
     out["n8_broker_with_superuser_role_option"] = refused(r) and "session user postgres switched to deca_brk" in r.stderr
     switched.unlink()
     anchors = st.run / "anchors-guard.ndjson"
-    r = deca_cli(st, {**denv["auditor"], "DECA_DB_URL_FILE": str(urls["owner"])}, "anchor-ledger", "--sink",
+    r = deca_cli(st, {**denv["auditor"], "HYPERSOAR_DB_URL_FILE": str(urls["owner"])}, "anchor-ledger", "--sink",
                  f"file:{anchors}", ok=(2,))
     out["anchor_with_owner_dsn"] = r["rc"] == 2 and not anchors.exists()
     summary["db_login_guard"] = out
@@ -624,7 +624,7 @@ def ship_anchors(anchor_file: Path, export: Path) -> None:
 
 
 def owner_conn(denv: dict) -> psycopg.Connection:
-    return psycopg.connect(Path(denv["owner"]["DECA_DB_URL_FILE"]).read_text().strip(), autocommit=True)
+    return psycopg.connect(Path(denv["owner"]["HYPERSOAR_DB_URL_FILE"]).read_text().strip(), autocommit=True)
 
 
 # --------------------------------------------------------------------------------------------- scenario
@@ -646,13 +646,13 @@ def scenario(st: Stack, summary: dict) -> int:
     P = st.ports
 
     # The worker refuses to start with database or vault credentials (review F5 / design 6.3).
-    r = subprocess.run([str(DECA_PY), "-m", "deca_soar.cli", "worker"], capture_output=True, text=True, timeout=60,
-                       env={**denv["worker"], "DECA_DB_URL_FILE": str(denv["urls"]["broker"])})
+    r = subprocess.run([str(HYPERSOAR_PY), "-m", "hypersoar.cli", "worker"], capture_output=True, text=True, timeout=60,
+                       env={**denv["worker"], "HYPERSOAR_DB_URL_FILE": str(denv["urls"]["broker"])})
     summary["checks"]["worker_refuses_db_credentials"] = r.returncode != 0 and "must not hold" in r.stderr
     guard_probes(st, pki, pg, denv, summary)
 
     b_cert, b_key = denv["broker_tls"]
-    st.start("deca-broker", [str(DECA_PY), "-m", "uvicorn", "deca_soar.broker.app:app", "--host", HOST,
+    st.start("deca-broker", [str(HYPERSOAR_PY), "-m", "uvicorn", "hypersoar.broker.app:app", "--host", HOST,
                              "--port", str(P["broker"]), "--no-access-log", "--no-server-header",
                              "--ssl-certfile", str(b_cert), "--ssl-keyfile", str(b_key)],
              env=denv["broker"], cwd=REPO)
@@ -682,10 +682,10 @@ def scenario(st: Stack, summary: dict) -> int:
          "src_ip": "203.0.113.8", "events": 300},
     ]
     replay.write_text("".join(json.dumps(x) + "\n" for x in alerts))
-    genv = {**denv["gateway"], "DECA_GATEWAY_SOURCE": "replay", "DECA_REPLAY_FILE": str(replay),
-            "DECA_SOURCE_NAME": "e2e", "DECA_PULL_INTERVAL_S": "2"}
+    genv = {**denv["gateway"], "HYPERSOAR_GATEWAY_SOURCE": "replay", "HYPERSOAR_REPLAY_FILE": str(replay),
+            "HYPERSOAR_SOURCE_NAME": "e2e", "HYPERSOAR_PULL_INTERVAL_S": "2"}
     # Gateway first, worker later: alerts must survive the worker not being there yet.
-    st.start("deca-gateway", [str(DECA_PY), "-m", "uvicorn", "deca_soar.gateway.app:app", "--host", HOST,
+    st.start("deca-gateway", [str(HYPERSOAR_PY), "-m", "uvicorn", "hypersoar.gateway.app:app", "--host", HOST,
                               "--port", str(P["gateway"]), "--no-access-log"], env=genv, cwd=REPO)
 
     def forwarded():
@@ -705,7 +705,7 @@ def scenario(st: Stack, summary: dict) -> int:
     summary["checks"]["workflows_wait_while_worker_down"] = states == ["WORKFLOW_EXECUTION_STATUS_RUNNING"] * len(ids)
 
     time.sleep(3)
-    st.start("deca-worker", [str(DECA_PY), "-m", "deca_soar.cli", "worker"], env=denv["worker"], cwd=REPO)
+    st.start("deca-worker", [str(HYPERSOAR_PY), "-m", "hypersoar.cli", "worker"], env=denv["worker"], cwd=REPO)
 
     def completed():
         st.check_alive()
@@ -898,7 +898,7 @@ def ledger_and_f3(st: Stack, denv: dict, summary: dict) -> None:
     with owner_conn(denv) as c, c.transaction():
         c.execute("ALTER TABLE ledger.entry DISABLE TRIGGER USER")
         c.execute("DELETE FROM ledger.entry WHERE seq = (SELECT min(seq) FROM ledger.entry)")
-        from deca_soar import ledger as L  # noqa: PLC0415 - only this owner-rewrite step needs it
+        from hypersoar import ledger as L  # noqa: PLC0415 - only this owner-rewrite step needs it
         prev = L.GENESIS
         for seq, canonical in c.execute("SELECT seq, canonical FROM ledger.entry ORDER BY seq").fetchall():
             h = L.chain_hash(prev, canonical)

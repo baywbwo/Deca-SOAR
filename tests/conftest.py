@@ -1,5 +1,5 @@
-"""Test fixtures. DB tests need either DECA_TEST_DB_URL (a superuser URL on a throwaway server)
-or DECA_TEST_PG_BIN (a directory with initdb/pg_ctl): then a private server is started on a unix socket."""
+"""Test fixtures. DB tests need either HYPERSOAR_TEST_DB_URL (a superuser URL on a throwaway server)
+or HYPERSOAR_TEST_PG_BIN (a directory with initdb/pg_ctl): then a private server is started on a unix socket."""
 
 from __future__ import annotations
 
@@ -14,22 +14,22 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from deca_soar.common.config import DEFAULT_INTERNAL_CIDRS, Settings, _cidrs
-from deca_soar.common.db import make_pool, migrate
-from deca_soar.common.pii import vault_public_key
+from hypersoar.common.config import DEFAULT_INTERNAL_CIDRS, Settings, _cidrs
+from hypersoar.common.db import make_pool, migrate
+from hypersoar.common.pii import vault_public_key
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="session")
 def pg_server():
-    url = os.environ.get("DECA_TEST_DB_URL")
+    url = os.environ.get("HYPERSOAR_TEST_DB_URL")
     if url:
         yield url
         return
-    pg_bin = os.environ.get("DECA_TEST_PG_BIN")
+    pg_bin = os.environ.get("HYPERSOAR_TEST_PG_BIN")
     if not pg_bin:
-        pytest.skip("no test database (set DECA_TEST_DB_URL or DECA_TEST_PG_BIN)")
+        pytest.skip("no test database (set HYPERSOAR_TEST_DB_URL or HYPERSOAR_TEST_PG_BIN)")
     d = Path(tempfile.mkdtemp(prefix="deca-pg-"))
     data, sock = d / "data", d / "sock"
     sock.mkdir()

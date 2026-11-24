@@ -42,7 +42,7 @@ services:
 
   temporal:
     <<: *hardened
-    image: ${DECA_LAB_TEMPORAL_IMAGE:-deca-lab-temporal:1.32.2}
+    image: ${HYPERSOAR_LAB_TEMPORAL_IMAGE:-deca-lab-temporal:1.32.2}
     environment:
       TEMPORAL_DB_PASSWORD_FILE: /etc/deca-soar/temporal/tls/db_password
       LOG_LEVEL: warn
@@ -70,9 +70,9 @@ services:
   broker:
     environment:
       # protected.yaml still holds the repo's RFC5737 placeholders and the synthetic alerts use
-      # TEST-NET addresses, both of which the broker refuses under DECA_ENV=production.
-      DECA_ENV: lab
-      DECA_ALLOW_TEST_NETS: "1"
+      # TEST-NET addresses, both of which the broker refuses under HYPERSOAR_ENV=production.
+      HYPERSOAR_ENV: lab
+      HYPERSOAR_ALLOW_TEST_NETS: "1"
     secrets: [deca_db_ca]
     ports: !reset []
     networks:
@@ -97,27 +97,27 @@ services:
 
   synth:
     <<: *hardened
-    image: ${DECA_SOAR_IMAGE:?e.g. deca-soar:<git-sha>}
-    command: ["deca-soar", "synth-alerts", "--out", "/data/replay/alerts.ndjson",
-              "--interval", "${DECA_LAB_SYNTH_INTERVAL_S:-90}"]
-    volumes: ["${DECA_REPLAY_DIR:?}:/data/replay"]
+    image: ${HYPERSOAR_IMAGE:?e.g. hypersoar:<git-sha>}
+    command: ["hypersoar", "synth-alerts", "--out", "/data/replay/alerts.ndjson",
+              "--interval", "${HYPERSOAR_LAB_SYNTH_INTERVAL_S:-90}"]
+    volumes: ["${HYPERSOAR_REPLAY_DIR:?}:/data/replay"]
     networks: [deca]
 
   console:
     <<: *hardened
-    image: ${DECA_SOAR_IMAGE:?e.g. deca-soar:<git-sha>}
-    command: ["uvicorn", "deca_soar.console.app:app", "--host", "0.0.0.0", "--port", "8300", "--no-server-header",
+    image: ${HYPERSOAR_IMAGE:?e.g. hypersoar:<git-sha>}
+    command: ["uvicorn", "hypersoar.console.app:app", "--host", "0.0.0.0", "--port", "8300", "--no-server-header",
               "--no-proxy-headers", "--ssl-certfile", "/run/secrets/console_tls_cert",
               "--ssl-keyfile", "/run/secrets/console_tls_key"]
     environment:
-      DECA_ENV: production
-      DECA_DB_URL_FILE: /run/secrets/deca_db_url_console
-      DECA_CONSOLE_PASSWORD_HASH_FILE: /run/secrets/console_password_hash
-      DECA_CONSOLE_USER: ${DECA_CONSOLE_USER:-owner}
+      HYPERSOAR_ENV: production
+      HYPERSOAR_DB_URL_FILE: /run/secrets/deca_db_url_console
+      HYPERSOAR_CONSOLE_PASSWORD_HASH_FILE: /run/secrets/console_password_hash
+      HYPERSOAR_CONSOLE_USER: ${HYPERSOAR_CONSOLE_USER:-owner}
       # Only the tunnel may set the client address used by the login rate limit.
-      DECA_CONSOLE_TRUSTED_PROXIES: 172.30.124.30/32
-      DECA_CONSOLE_SYNTHETIC: "1"
-      DECA_GIT_SHA: ${DECA_GIT_SHA:-unknown}
+      HYPERSOAR_CONSOLE_TRUSTED_PROXIES: 172.30.124.30/32
+      HYPERSOAR_CONSOLE_SYNTHETIC: "1"
+      HYPERSOAR_GIT_SHA: ${HYPERSOAR_GIT_SHA:-unknown}
     secrets: [deca_db_url_console, deca_db_ca, console_password_hash, console_tls_cert, console_tls_key]
     networks:
       deca: {ipv4_address: 172.30.124.20}

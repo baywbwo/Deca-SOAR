@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from deca_soar import ledger
+from hypersoar import ledger
 
 FEED_LIMIT = 30
 LEDGER_TAIL = 10

@@ -5,8 +5,8 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
 
-from deca_soar.common.config import ConfigError
-from deca_soar.common.dbguard import login_problems
+from hypersoar.common.config import ConfigError
+from hypersoar.common.dbguard import login_problems
 
 from test_broker_api import env, principals  # noqa: F401  (fixtures)
 from test_preflight import _secrets, _status, pf  # noqa: F401  (fixture)
@@ -57,8 +57,8 @@ def test_n8_owner_with_role_option_refused(pg_server, db_url, roles, conn):
 
 
 def test_n8_broker_refuses_to_start_with_role_option_dsn(env, principals, settings, roles):  # noqa: F811
-    env.setenv("DECA_DB_URL", _with_options(settings.db_url, _user(roles["broker"])))
-    from deca_soar.broker.app import app
+    env.setenv("HYPERSOAR_DB_URL", _with_options(settings.db_url, _user(roles["broker"])))
+    from hypersoar.broker.app import app
     with pytest.raises(ConfigError, match="refusing to start"):
         with TestClient(app):
             pass
