@@ -1,0 +1,13 @@
+version: 1
+id: waf.scan.path_enum
+title: Path enumeration scan
+category: Scanning and enumeration
+source: waf
+severity: medium
+mitre: {tactic: TA0043, tactic_name: Reconnaissance, technique: T1595.003, technique_name: Wordlist Scanning}
+path: {from: ip, rel: targets, to: asset}
+outcome: attempted
+step: "{events} paths probed on {asset}"
+tests:
+  - raw: {source: waf, rule_id: waf.scan.path_enum, severity_hint: medium, src_ip: 203.0.113.33, dst_asset: portal.dob, events: 300}
+    expect: {category: Scanning and enumeration, tactic: TA0043, technique: T1595.003}

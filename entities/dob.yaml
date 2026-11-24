@@ -1,0 +1,79 @@
+# Entity config: one HyperSoar install per company. This file is PT Delta Omega Beta (DOB).
+# No secret values here: every credential is the NAME of a file under HYPERSOAR_SECRETS_DIR
+# (a Docker secret mount, mode 0400). Sandbox and production point at different targets.
+version: 1
+id: dob
+name: PT Delta Omega Beta
+short: DOB
+timezone: Asia/Jakarta
+cloud:
+  provider: alibaba
+  region: ap-southeast-5
+  region_label: Alibaba Cloud Jakarta
+  # Where every attack arc lands on the console map (worldmap.svg coordinates, 1200x508).
+  map_xy: [915.5, 317.2]
+
+# Correlation (G1): alerts sharing a source IP, principal or AccessKey within this window join one case.
+correlation:
+  window_s: 3600
+
+# Asset criticality 1..5 feeds case priority (highest severity x criticality). `protected: true` means
+# the broker never isolates or changes it automatically, whatever the alert says.
+assets:
+  - {name: merchant-login.qash, kind: waf_domain, criticality: 5, protected: false}
+  - {name: api.qash, kind: waf_domain, criticality: 5, protected: false}
+  - {name: portal.dob, kind: waf_domain, criticality: 3, protected: false}
+  - {name: ecs-web-02, kind: ecs, instance_id: i-dobweb02, criticality: 4, protected: false}
+  - {name: ecs-pay-01, kind: ecs, instance_id: i-dobpay01, criticality: 5, protected: true}
+  - {name: ram-console, kind: ram, criticality: 5, protected: false}
+  - {name: oss-backup, kind: oss, criticality: 4, protected: true}
+default_criticality: 2
+
+targets:
+  sandbox:
+    alibaba_account: sandbox-dob
+    waf_instance: waf-jkt-01
+    jira:
+      mode: mock
+      base_url: https://jira.sandbox.invalid
+      project: DOBSBX
+      issue_type: Task
+      user_file: jira_user
+      token_file: jira_api_token
+    lark:
+      mode: mock
+      chat: SOC DOB (sandbox)
+      webhook_url_file: lark_webhook_url
+      secret_file: lark_signing_secret
+    ai:
+      mode: mock
+      provider: 9router AI DECA
+      base_url: https://9router.sandbox.invalid/v1
+      model: deca-soc-triage
+      api_key_file: ai_api_key
+      timeout_s: 20
+  production:
+    alibaba_account: REPLACE_WITH_DOB_ACCOUNT_ID
+    waf_instance: REPLACE_WITH_WAF_INSTANCE
+    # dispatch: shadow records what would be sent; `on` sends it. Turning it on is a reviewed change.
+    jira:
+      mode: live
+      dispatch: shadow
+      base_url: https://REPLACE_WITH_JIRA_SITE.atlassian.net
+      project: REPLACE_WITH_PROJECT_KEY
+      issue_type: Task
+      user_file: jira_user
+      token_file: jira_api_token
+    lark:
+      mode: live
+      dispatch: shadow
+      chat: SOC DOB
+      webhook_url_file: lark_webhook_url
+      secret_file: lark_signing_secret
+    ai:
+      mode: live
+      provider: 9router AI DECA
+      base_url: https://REPLACE_WITH_9ROUTER_HOST/v1
+      model: REPLACE_WITH_MODEL
+      api_key_file: ai_api_key
+      timeout_s: 20

@@ -60,9 +60,10 @@ def default_idempotency_key(alert_id: str, action: str, params: dict) -> str:
     return hashlib.sha256(f"{alert_id}|{action}|{ledger.canonical_json(params)}".encode()).hexdigest()
 
 
-def kill_switch_state(conn: psycopg.Connection, action: str) -> bool:
+def kill_switch_state(conn: psycopg.Connection, action: str, entity_id: str = "dob") -> bool:
     r = conn.execute(
-        "SELECT bool_or(engaged) AS on FROM broker.kill_switch WHERE scope IN ('global', %s)", (action,)
+        "SELECT bool_or(engaged) AS on FROM broker.kill_switch WHERE entity_id = %s AND scope IN ('global', %s)",
+        (entity_id, action),
     ).fetchone()
     return bool(r and r["on"])
 
@@ -245,11 +246,12 @@ def decide_approval(conn: psycopg.Connection, who: Principal, request_id: str, a
     return _request_view(row)
 
 
-def set_kill_switch(conn: psycopg.Connection, who_id: str, actor: str, scope: str, engaged: bool) -> None:
+def set_kill_switch(conn: psycopg.Connection, who_id: str, actor: str, scope: str, engaged: bool,
+                    entity_id: str = "dob") -> None:
     conn.execute(
-        "INSERT INTO broker.kill_switch (scope, engaged, changed_by) VALUES (%s, %s, %s)"
-        " ON CONFLICT (scope) DO UPDATE SET engaged = EXCLUDED.engaged, changed_by = EXCLUDED.changed_by,"
+        "INSERT INTO broker.kill_switch (entity_id, scope, engaged, changed_by) VALUES (%s, %s, %s, %s)"
+        " ON CONFLICT (entity_id, scope) DO UPDATE SET engaged = EXCLUDED.engaged, changed_by = EXCLUDED.changed_by,"
         " changed_at = now()",
-        (scope, engaged, who_id),
+        (entity_id, scope, engaged, who_id),
     )
-    ledger.append(conn, "kill_switch.changed", actor, {"scope": scope, "engaged": engaged})
+    ledger.append(conn, "kill_switch.changed", actor, {"scope": scope, "engaged": engaged}, entity_id)

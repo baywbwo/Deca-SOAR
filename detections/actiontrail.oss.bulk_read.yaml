@@ -1,0 +1,13 @@
+version: 1
+id: actiontrail.oss.bulk_read
+title: Bulk object reads from a tier 1 bucket
+category: Cloud key misuse
+source: actiontrail
+severity: critical
+mitre: {tactic: TA0009, tactic_name: Collection, technique: T1530, technique_name: Data from Cloud Storage}
+path: {from: ak, rel: targets, to: asset}
+outcome: allowed
+step: "{events} objects read from {asset}"
+tests:
+  - raw: {source: actiontrail, rule_id: actiontrail.oss.bulk_read, severity_hint: critical, src_ip: 203.0.113.5, access_key_id: LTAI5tSyntheticKey7Q2F, dst_asset: oss-backup, events: 41}
+    expect: {category: Cloud key misuse, tactic: TA0009, technique: T1530, step: 41 objects read from oss-backup}

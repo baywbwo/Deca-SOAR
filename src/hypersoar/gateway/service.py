@@ -10,8 +10,11 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from hypersoar import ledger
+from hypersoar.common import entity as entity_mod
 from hypersoar.common.config import Settings
+from hypersoar.common.entity import Entity
 from hypersoar.common.pii import Tokenizer, VaultWriter
+from hypersoar.gateway import cases
 from hypersoar.gateway.normalize import NormalizeError, normalize
 from hypersoar.gateway.sources import AlertSource
 
@@ -25,12 +28,16 @@ class PullResult:
     new: int = 0
     merged: int = 0
     rejected: int = 0
+    closed: int = 0
     cursor: str = ""
 
 
-def pull_once(pool: ConnectionPool, source: AlertSource, settings: Settings, *, limit: int = 500) -> PullResult:
-    """One pull cycle. Inbox rows, vault entries, ledger entries and the cursor commit together,
+def pull_once(pool: ConnectionPool, source: AlertSource, settings: Settings, *, limit: int = 500,
+              entity: Entity | None = None) -> PullResult:
+    """One pull cycle. Inbox rows, cases, vault entries, ledger entries and the cursor commit together,
     so a crash either keeps the whole batch or none of it (no event lost, none double-counted)."""
+    entity = entity or entity_mod.load()
+    eid = entity.id
     vault = VaultWriter(settings.vault_public_key, settings.vault_key_id)
     res = PullResult()
     with pool.connection() as conn, conn.transaction():
@@ -45,26 +52,32 @@ def pull_once(pool: ConnectionPool, source: AlertSource, settings: Settings, *, 
                 if raw.get("_invalid"):
                     raise NormalizeError("invalid JSON line")
                 tok = Tokenizer(settings.tokenization_key, settings.internal_cidrs)
-                na = normalize(raw, tok, source_name=source.name)
+                na = normalize(raw, tok, source_name=source.name, keep_truth=entity.mode == "sandbox")
             except (NormalizeError, KeyError, TypeError, ValueError) as e:
                 res.rejected += 1
-                ledger.append(conn, "ingest.rejected", ACTOR, {"source": source.name, "reason": str(e)[:200]})
+                ledger.append(conn, "ingest.rejected", ACTOR, {"source": source.name, "reason": str(e)[:200]}, eid)
                 continue
             vault.store(conn, na.found)
             ins = conn.execute(
-                "INSERT INTO gateway.inbox_event (alert_id, fingerprint, source, rule_id, severity_hint,"
+                "INSERT INTO gateway.inbox_event (entity_id, alert_id, fingerprint, source, rule_id, severity_hint,"
                 " detected_at, event_count, alert, evidence_tokens)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT (fingerprint) DO UPDATE SET event_count = gateway.inbox_event.event_count"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (entity_id, fingerprint) DO UPDATE SET event_count = gateway.inbox_event.event_count"
                 "   + EXCLUDED.event_count, last_seen_at = now()"
                 " RETURNING alert_id, (xmax = 0) AS inserted",
                 (
-                    na.alert_id, na.fingerprint, na.source, na.rule_id, na.severity_hint, na.detected_at,
+                    eid, na.alert_id, na.fingerprint, na.source, na.rule_id, na.severity_hint, na.detected_at,
                     na.event_count, Jsonb(na.alert), na.evidence_tokens,
                 ),
             ).fetchone()
             if ins["inserted"]:
                 res.new += 1
+                case_id = cases.attach(conn, entity, na.alert, na.detected_at, na.event_count)
+                conn.execute(
+                    "UPDATE gateway.inbox_event SET alert = alert || jsonb_build_object('case_id', %s::text)"
+                    " WHERE alert_id = %s",
+                    (case_id, ins["alert_id"]),
+                )
                 ledger.append(
                     conn,
                     "alert.ingested",
@@ -75,15 +88,19 @@ def pull_once(pool: ConnectionPool, source: AlertSource, settings: Settings, *, 
                         "rule_id": na.rule_id,
                         "source": na.source,
                         "severity_hint": na.severity_hint,
+                        "case_id": case_id,
                     },
+                    eid,
                 )
             else:
                 res.merged += 1
+                cases.add_events(conn, eid, ins["alert_id"], na.event_count)
         conn.execute(
             "INSERT INTO gateway.ingest_cursor (source_name, cursor) VALUES (%s, %s)"
             " ON CONFLICT (source_name) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()",
             (source.name, new_cursor),
         )
+        res.closed = len(cases.close_idle(conn, entity))
         res.cursor = new_cursor
     return res
 
@@ -113,7 +130,7 @@ def forward_once(pool: ConnectionPool, deliver: Deliver, *, batch: int = 50) -> 
     with pool.connection() as conn:
         with conn.transaction():
             rows = conn.execute(
-                "SELECT alert_id, alert, event_count, attempts FROM gateway.inbox_event"
+                "SELECT entity_id, alert_id, alert, event_count, attempts FROM gateway.inbox_event"
                 " WHERE status = 'pending' AND next_attempt_at <= now()"
                 " ORDER BY next_attempt_at LIMIT %s FOR UPDATE SKIP LOCKED",
                 (batch,),
@@ -135,7 +152,8 @@ def forward_once(pool: ConnectionPool, deliver: Deliver, *, batch: int = 50) -> 
                     )
                     if dead:
                         res.dead += 1
-                        ledger.append(conn, "alert.dead_letter", ACTOR, {"alert_id": str(r["alert_id"]), "error": err})
+                        ledger.append(conn, "alert.dead_letter", ACTOR, {"alert_id": str(r["alert_id"]), "error": err},
+                                      r["entity_id"])
                     else:
                         res.failed += 1
                     continue
@@ -145,6 +163,7 @@ def forward_once(pool: ConnectionPool, deliver: Deliver, *, batch: int = 50) -> 
                     " attempts = attempts + 1, downstream_ref = %s, last_error = NULL WHERE alert_id = %s",
                     (ref, r["alert_id"]),
                 )
-                ledger.append(conn, "alert.forwarded", ACTOR, {"alert_id": str(r["alert_id"]), "downstream_ref": ref})
+                ledger.append(conn, "alert.forwarded", ACTOR, {"alert_id": str(r["alert_id"]), "downstream_ref": ref},
+                              r["entity_id"])
                 res.sent += 1
     return res

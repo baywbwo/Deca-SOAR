@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from hypersoar.common.config import ConfigError
 
-HYPERSOAR_SCHEMAS = ("gateway", "vault", "broker", "ledger")
+HYPERSOAR_SCHEMAS = ("gateway", "vault", "broker", "ledger", "qa")
 TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 
 # service -> (group role, {table: table-level privileges}). Column-level grants are in EXPECTED_COLUMNS.
@@ -22,8 +22,14 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
     "gateway": ("deca_soar_gateway", {
         "gateway.ingest_cursor": {"SELECT", "INSERT", "UPDATE"},
         "gateway.inbox_event": {"SELECT", "INSERT", "UPDATE"},
+        "gateway.alert_case": {"SELECT", "INSERT", "UPDATE"},
+        "gateway.case_alert": {"SELECT", "INSERT", "UPDATE"},
+        "gateway.case_key": {"SELECT", "INSERT", "UPDATE"},
+        "gateway.entity_relation": {"SELECT", "INSERT", "UPDATE"},
+        "gateway.case_step": {"SELECT", "INSERT", "UPDATE"},
         "vault.token_map": {"INSERT"},
         "ledger.entry": {"SELECT"},
+        "public.hypersoar_install": {"SELECT"},
     }),
     "broker": ("deca_soar_broker", {
         "gateway.inbox_event": {"SELECT"},
@@ -32,7 +38,20 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
         "broker.decision_record": {"SELECT", "INSERT"},
         "broker.action_request": {"SELECT", "INSERT", "UPDATE"},
         "broker.kill_switch": {"SELECT", "INSERT", "UPDATE"},
+        "gateway.alert_case": {"SELECT"},
+        "gateway.case_alert": {"SELECT"},
+        "gateway.case_step": {"SELECT"},
+        "gateway.entity_relation": {"SELECT"},
+        "broker.integration_call": {"SELECT", "INSERT"},
+        "broker.integration_config_version": {"SELECT", "INSERT"},
+        "broker.integration_test_run": {"SELECT", "INSERT"},
+        "broker.jira_issue": {"SELECT", "INSERT", "UPDATE"},
+        "broker.integration_config": {"SELECT", "INSERT", "UPDATE"},
+        "broker.integration_secret": {"SELECT", "INSERT", "UPDATE"},
+        "broker.ai_usage": {"SELECT", "INSERT", "UPDATE"},
+        "qa.scenario_run": {"SELECT", "INSERT"},
         "ledger.entry": {"SELECT"},
+        "public.hypersoar_install": {"SELECT"},
     }),
     "auditor": ("deca_soar_auditor", {
         "ledger.entry": {"SELECT"},
@@ -43,13 +62,28 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
         "broker.decision_record": {"SELECT"},
         "broker.action_request": {"SELECT"},
         "broker.kill_switch": {"SELECT"},
+        "gateway.alert_case": {"SELECT"},
+        "gateway.case_alert": {"SELECT"},
+        "gateway.case_key": {"SELECT"},
+        "gateway.entity_relation": {"SELECT"},
+        "gateway.case_step": {"SELECT"},
+        "broker.integration_call": {"SELECT"},
+        "broker.jira_issue": {"SELECT"},
+        "broker.integration_config": {"SELECT"},
+        "broker.integration_config_version": {"SELECT"},
+        "broker.integration_test_run": {"SELECT"},
+        "broker.ai_usage": {"SELECT"},
+        "qa.scenario_run": {"SELECT"},
         "ledger.entry": {"SELECT"},
+        "public.hypersoar_install": {"SELECT"},
     }),
 }
 
 LEDGER_WRITERS = ("gateway", "broker")
 COLUMN_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "REFERENCES")
-LEDGER_INSERT_COLUMNS = ("recorded_at", "event_type", "actor", "payload", "canonical", "prev_hash", "hash")
+LEDGER_INSERT_COLUMNS = (
+    "recorded_at", "event_type", "actor", "payload", "canonical", "prev_hash", "hash", "entity_id",
+)
 
 # service -> {(table, column, privilege)} granted per column (migrations 0002 and 0003), on top of EXPECTED.
 EXPECTED_COLUMNS: dict[str, set[tuple[str, str, str]]] = {
@@ -57,7 +91,8 @@ EXPECTED_COLUMNS: dict[str, set[tuple[str, str, str]]] = {
                | {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
     "broker": {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
     "auditor": set(),
-    "console": set(),
+    "console": {("broker.integration_secret", c, "SELECT") for c in (
+        "entity_id", "integration", "mode", "name", "key_id", "rotated_at", "rotated_by", "expires_at")},
 }
 
 
@@ -114,7 +149,8 @@ def login_problems(conn, service: str) -> list[str]:
         "SELECT n.nspname || '.' || c.relname, p FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
         " CROSS JOIN unnest(%s::text[]) p"
         " WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')"
-        " AND (n.nspname = ANY(%s) OR (n.nspname = 'public' AND c.relname = 'deca_schema_migrations'))"
+        " AND (n.nspname = ANY(%s)"
+        "      OR (n.nspname = 'public' AND c.relname IN ('deca_schema_migrations', 'hypersoar_install')))"
         " AND has_table_privilege(c.oid, p)",
         (privs, list(HYPERSOAR_SCHEMAS)),
     ):

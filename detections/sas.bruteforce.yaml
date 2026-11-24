@@ -1,0 +1,13 @@
+version: 1
+id: sas.bruteforce
+title: SSH brute force against an ECS instance
+category: Brute force SSH
+source: sas
+severity: medium
+mitre: {tactic: TA0006, tactic_name: Credential access, technique: T1110.001, technique_name: Password Guessing}
+path: {from: ip, rel: targets, to: asset}
+outcome: attempted
+step: "{events} SSH logins tried on {asset}"
+tests:
+  - raw: {source: sas, rule_id: sas.bruteforce, severity_hint: low, src_ip: 203.0.113.50, dst_asset: ecs-web-02, events: 318}
+    expect: {category: Brute force SSH, tactic: TA0006, technique: T1110.001, step: 318 SSH logins tried on ecs-web-02}

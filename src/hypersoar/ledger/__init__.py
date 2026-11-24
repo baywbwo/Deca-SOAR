@@ -28,9 +28,15 @@ def chain_hash(prev_hash: str, canonical: str) -> str:
     return hashlib.sha256(bytes.fromhex(prev_hash) + canonical.encode("utf-8")).hexdigest()
 
 
-def envelope(event_type: str, actor: str, payload: dict, recorded_at: datetime) -> dict:
+DEFAULT_ENTITY = "dob"
+
+
+def envelope(event_type: str, actor: str, payload: dict, recorded_at: datetime,
+             entity_id: str = DEFAULT_ENTITY) -> dict:
+    # v2 adds entity_id to what is hashed; v1 entries (before migration 0005) belong to dob.
     return {
-        "v": 1,
+        "v": 2,
+        "entity_id": entity_id,
         "event_type": event_type,
         "actor": actor,
         "recorded_at": recorded_at.astimezone(UTC).isoformat(),
@@ -44,18 +50,19 @@ class Appended:
     hash: str
 
 
-def append(conn: psycopg.Connection, event_type: str, actor: str, payload: dict) -> Appended:
+def append(conn: psycopg.Connection, event_type: str, actor: str, payload: dict,
+           entity_id: str = DEFAULT_ENTITY) -> Appended:
     """Append one entry inside the caller's transaction."""
     conn.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))
     row = conn.execute("SELECT hash FROM ledger.entry ORDER BY seq DESC LIMIT 1").fetchone()
     prev = _col(row, "hash", 0) if row else GENESIS
     recorded_at = datetime.now(UTC)
-    canonical = canonical_json(envelope(event_type, actor, payload, recorded_at))
+    canonical = canonical_json(envelope(event_type, actor, payload, recorded_at, entity_id))
     digest = chain_hash(prev, canonical)
     out = conn.execute(
-        "INSERT INTO ledger.entry (recorded_at, event_type, actor, payload, canonical, prev_hash, hash)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING seq",
-        (recorded_at, event_type, actor, Jsonb(payload), canonical, prev, digest),
+        "INSERT INTO ledger.entry (recorded_at, event_type, actor, payload, canonical, prev_hash, hash, entity_id)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING seq",
+        (recorded_at, event_type, actor, Jsonb(payload), canonical, prev, digest, entity_id),
     ).fetchone()
     return Appended(seq=_col(out, "seq", 0), hash=digest)
 
@@ -69,20 +76,36 @@ class VerifyResult:
     errors: list[str] = field(default_factory=list)
 
 
-def verify(conn: psycopg.Connection, *, max_errors: int = 20) -> VerifyResult:
-    """Walk the whole chain and recompute every link."""
+def verify(conn: psycopg.Connection, *, max_errors: int = 20,
+           after: tuple[int, str] | None = None) -> VerifyResult:
+    """Walk the chain and recompute every link.
+
+    `after=(seq, hash)` continues from a head that an earlier full walk verified; `entries` then
+    counts only the new ones. Callers still run a full walk now and then, since an incremental
+    walk cannot see an edit before that head.
+    """
     prev = GENESIS
     count = 0
     head_seq: int | None = None
     errors: list[str] = []
+    start = 0
+    if after is not None:
+        start, prev = after
+        head_seq = start
+        row = conn.execute("SELECT hash FROM ledger.entry WHERE seq = %s", (start,)).fetchone()
+        if row is None or _col(row, "hash", 0) != prev:
+            return VerifyResult(ok=False, entries=0, head_seq=start, head_hash=prev,
+                                errors=[f"seq {start}: verified head changed or disappeared"])
     with conn.transaction(), conn.cursor(name="ledger_verify") as cur:
         cur.execute(
-            "SELECT seq, recorded_at, event_type, actor, payload, canonical, prev_hash, hash"
-            " FROM ledger.entry ORDER BY seq"
+            "SELECT seq, recorded_at, event_type, actor, payload, canonical, prev_hash, hash, entity_id"
+            " FROM ledger.entry WHERE seq > %s ORDER BY seq",
+            (start,),
         )
         for r in cur:
-            seq, recorded_at, event_type, actor, payload, canonical, prev_hash, digest = (
-                r[k] for k in ("seq", "recorded_at", "event_type", "actor", "payload", "canonical", "prev_hash", "hash")
+            seq, recorded_at, event_type, actor, payload, canonical, prev_hash, digest, entity_id = (
+                r[k] for k in ("seq", "recorded_at", "event_type", "actor", "payload", "canonical", "prev_hash",
+                               "hash", "entity_id")
             ) if isinstance(r, dict) else r
             count += 1
             head_seq = seq
@@ -96,6 +119,7 @@ def verify(conn: psycopg.Connection, *, max_errors: int = 20) -> VerifyResult:
                     env.get("event_type") != event_type
                     or env.get("actor") != actor
                     or env.get("payload") != payload
+                    or env.get("entity_id", DEFAULT_ENTITY) != entity_id
                     or datetime.fromisoformat(env.get("recorded_at")) != recorded_at
                 ):
                     errors.append(f"seq {seq}: stored columns differ from hashed canonical")

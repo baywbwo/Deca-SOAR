@@ -1,0 +1,13 @@
+version: 1
+id: waf.sqli.burst
+title: Burst of SQL injection payloads
+category: SQL injection
+source: waf
+severity: high
+mitre: {tactic: TA0001, tactic_name: Initial access, technique: T1190, technique_name: Exploit Public-Facing Application}
+path: {from: ip, rel: targets, to: asset}
+outcome: attempted
+step: "{events} SQL injection payloads sent to {asset}"
+tests:
+  - raw: {source: waf, rule_id: waf.sqli.burst, severity_hint: high, src_ip: 203.0.113.20, dst_asset: api.qash, events: 90}
+    expect: {category: SQL injection, tactic: TA0001, technique: T1190}

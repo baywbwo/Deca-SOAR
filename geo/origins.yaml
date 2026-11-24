@@ -1,0 +1,22 @@
+# Local geo table for the synthetic feed. No lookup service is ever called.
+# Only documentation ranges (RFC 5737) appear here, cut into /28 blocks per city, so the console can
+# show a city, ASN and map position without any real address. The gateway resolves the raw IP
+# against this table before tokenising it; an address that is not listed has no origin (null).
+# xy are worldmap.svg coordinates (1200x508). Production replaces this file with a licensed table.
+version: 1
+origins:
+  - {cidr: 203.0.113.0/28, city: Amsterdam, country: NL, asn: AS208294, as_name: Tor exit, tor: true, xy: [579.6, 91.7]}
+  - {cidr: 203.0.113.16/28, city: Frankfurt, country: DE, asn: AS24940, as_name: Hetzner, tor: false, xy: [590.3, 100.1]}
+  - {cidr: 203.0.113.32/28, city: Ashburn, country: US, asn: AS14618, as_name: AWS, tor: false, xy: [323.7, 142.2]}
+  - {cidr: 203.0.113.48/28, city: Hanoi, country: VN, asn: AS7552, as_name: Viettel, tor: false, xy: [906.4, 212.0]}
+  - {cidr: 203.0.113.64/28, city: Singapore, country: SG, asn: AS45102, as_name: Alibaba, tor: false, xy: [906.0, 288.1]}
+  - {cidr: 203.0.113.80/28, city: Hong Kong, country: HK, asn: AS9312, as_name: xTom, tor: false, xy: [932.6, 207.0]}
+  - {cidr: 203.0.113.96/28, city: Moscow, country: RU, asn: AS49505, as_name: Selectel, tor: false, xy: [672.1, 79.3]}
+  - {cidr: 203.0.113.112/28, city: Sao Paulo, country: BR, asn: AS28573, as_name: Claro, tor: false, xy: [409.7, 384.3]}
+  - {cidr: 203.0.113.128/28, city: Mumbai, country: IN, asn: AS9829, as_name: BSNL, tor: false, xy: [799.5, 219.6]}
+  - {cidr: 203.0.113.144/28, city: Seoul, country: KR, asn: AS4766, as_name: KT, tor: false, xy: [957.2, 147.9]}
+  - {cidr: 203.0.113.160/28, city: Lagos, country: NG, asn: AS37148, as_name: Globacom, tor: false, xy: [571.3, 268.1]}
+  - {cidr: 203.0.113.176/28, city: Bucharest, country: RO, asn: AS9050, as_name: Telekom RO, tor: false, xy: [642.5, 121.5]}
+  - {cidr: 203.0.113.192/28, city: Los Angeles, country: US, asn: AS20473, as_name: Vultr, tor: false, xy: [190.0, 161.5]}
+  # On the protected list (partner bank placeholder): it still gets an origin, the broker still refuses it.
+  - {cidr: 198.51.100.0/25, city: Singapore, country: SG, asn: AS45102, as_name: Alibaba, tor: false, xy: [906.0, 288.1]}

@@ -1,0 +1,13 @@
+version: 1
+id: actiontrail.ram.assume_role_denied
+title: AssumeRole into a privileged role denied
+category: Cloud key misuse
+source: actiontrail
+severity: high
+mitre: {tactic: TA0008, tactic_name: Lateral movement, technique: T1550.001, technique_name: Application Access Token}
+path: {from: ak, rel: moves_to, to: asset}
+outcome: blocked
+step: "AssumeRole to {asset} denied by RAM"
+tests:
+  - raw: {source: actiontrail, rule_id: actiontrail.ram.assume_role_denied, severity_hint: high, src_ip: 203.0.113.5, access_key_id: LTAI5tSyntheticKey7Q2F, dst_asset: ram-console}
+    expect: {category: Cloud key misuse, tactic: TA0008, technique: T1550.001, outcome: blocked}

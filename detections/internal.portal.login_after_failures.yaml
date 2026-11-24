@@ -1,0 +1,13 @@
+version: 1
+id: internal.portal.login_after_failures
+title: Login succeeded after a burst of failed attempts
+category: Account takeover
+source: internal
+severity: high
+mitre: {tactic: TA0001, tactic_name: Initial access, technique: T1078, technique_name: Valid Accounts}
+path: {from: ip, rel: authenticates_as, to: user}
+outcome: allowed
+step: "Login for a merchant account succeeded after failed attempts"
+tests:
+  - raw: {source: internal, rule_id: internal.portal.login_after_failures, severity_hint: high, src_ip: 203.0.113.5, principal: m-20931, dst_asset: merchant-login.qash}
+    expect: {category: Account takeover, tactic: TA0001, technique: T1078}

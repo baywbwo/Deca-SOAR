@@ -1,0 +1,13 @@
+version: 1
+id: actiontrail.ak_unusual_ip
+title: AccessKey used from an IP outside its usual network
+category: Cloud key misuse
+source: actiontrail
+severity: critical
+mitre: {tactic: TA0001, tactic_name: Initial access, technique: T1078.004, technique_name: "Valid Accounts: Cloud Accounts"}
+path: {from: ip, rel: uses_key, to: ak}
+outcome: allowed
+step: "AccessKey {ak} used from an unusual IP"
+tests:
+  - raw: {source: actiontrail, rule_id: actiontrail.ak_unusual_ip, severity_hint: critical, src_ip: 203.0.113.5, principal: svc-settlement-report, access_key_id: LTAI5tSyntheticKey7Q2F}
+    expect: {category: Cloud key misuse, tactic: TA0001, technique: T1078.004, step: "AccessKey ****7Q2F used from an unusual IP"}

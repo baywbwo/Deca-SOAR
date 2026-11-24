@@ -1,0 +1,13 @@
+version: 1
+id: internal.portal.settlement_export
+title: Settlement export bundle with embedded credentials downloaded
+category: Account takeover
+source: internal
+severity: high
+mitre: {tactic: TA0006, tactic_name: Credential access, technique: T1552.001, technique_name: Credentials In Files}
+path: {from: user, rel: targets, to: asset}
+outcome: allowed
+step: "Settlement export downloaded through {asset}"
+tests:
+  - raw: {source: internal, rule_id: internal.portal.settlement_export, severity_hint: high, src_ip: 203.0.113.5, principal: m-20931, dst_asset: portal.dob}
+    expect: {category: Account takeover, tactic: TA0006, technique: T1552.001, step: Settlement export downloaded through portal.dob}
