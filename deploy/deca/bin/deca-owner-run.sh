@@ -26,6 +26,14 @@ if [ -e "$SECRETS_DIR/deca_db_url_owner" ]; then
   exit 65
 fi
 
+# A directory from an earlier run that was SIGKILLed or lost power still holds the owner DSN (N10).
+for left in "$TMPBASE"/deca-owner.*; do
+  if [ -e "$left" ]; then
+    echo "$left left over from an earlier owner job: shred it and rotate the owner password first (RUNBOOK §5)" >&2
+    exit 65
+  fi
+done
+
 umask 077
 DIR=$(mktemp -d "$TMPBASE/deca-owner.XXXXXX")
 trap 'rm -rf "$DIR"' EXIT

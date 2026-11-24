@@ -52,8 +52,13 @@ Tidak ada aplikasi yang login sebagai `deca_owner`, jadi tidak ada proses yang b
 Login `deca_gw`/`deca_brk`/`deca_aud` jangan diberi atribut atau grant lain: broker, gateway dan job anchor mengecek
 login DB-nya saat start dan **menolak jalan** bila login itu superuser/CREATEROLE/CREATEDB/BYPASSRLS/REPLICATION,
 owner schema/tabel/DB, anggota role lain (termasuk `deca_owner`, `pg_read_all_data`), atau punya hak tabel/sequence/
-schema di luar kebutuhan rolenya (review N4). Pesan error menyebut hak yang berlebih; perbaiki grant, jangan
-melonggarkan cek. Role aplikasi juga tidak bisa mengisi `ledger.entry.seq` sendiri (N7, migrasi 0003).
+schema di luar kebutuhan rolenya (review N4), punya grant per kolom di luar migrasi 0002/0003 (mis. `UPDATE(record)`
+di `broker.decision_record`) atau `EXECUTE` pada fungsi di schema DECA / fungsi `SECURITY DEFINER` di `public` (N9).
+Pesan error menyebut hak yang berlebih; perbaiki grant, jangan melonggarkan cek. Role aplikasi juga tidak bisa mengisi
+`ledger.entry.seq` sendiri (N7, migrasi 0003).
+**Jangan** memakai satu login admin/owner yang "diturunkan" lewat `options=-c role=…` di DSN atau `PGOPTIONS` (N8):
+`RESET ROLE` mengembalikan hak login asli. Guard menolak bila `session_user` ≠ `current_user` (dan melaporkan atribut
+login asli); preflight FAIL bila DSN aplikasi memuat `options` atau env memuat variabel `PG*`.
 
 ## 3. Sertifikat dan secret (di ECS, bukan di repo/chat/log)
 ```sh
@@ -148,6 +153,11 @@ sudo cp deploy/deca/systemd/deca-ledger-anchor.* /etc/systemd/system/ && sudo sy
   menyebut secret owner sama sekali, jadi `up` tidak pernah bisa menjalankan proses owner.
 - Jangan taruh DSN di argumen atau `export`: masuk history shell / `ps`. Kalau DSN owner pernah tersimpan di host,
   hapus file lalu **rotasi password `deca_owner`**.
+- **Setelah setiap owner job (N10)**: `sudo ls -d /dev/shm/deca-owner.* 2>/dev/null` harus kosong. `trap` tidak jalan
+  bila skrip kena SIGKILL/OOM atau host mati, jadi direktori 0700 berisi DSN owner bisa tertinggal sampai reboot.
+  Kalau ada: `sudo shred -u /dev/shm/deca-owner.*/deca_db_url_owner && sudo rmdir /dev/shm/deca-owner.*`, lalu
+  **rotasi password `deca_owner`** di RDS dan vault ops, dan catat di log insiden. Selama ada sisa, `deca-owner-run.sh`
+  menolak jalan (exit 65) dan preflight FAIL (`owner: no leftover owner DSN directory`).
 - `/etc/deca-soar/policy` = salinan `policy/` yang sudah direview; `protected.yaml` harus berisi IP/principal nyata
   (placeholder RFC5737 dihapus), kalau tidak broker menolak start di `DECA_ENV=production`.
 - Approver = principal `human` role `approver`; service tidak pernah bisa approve atau kill switch.

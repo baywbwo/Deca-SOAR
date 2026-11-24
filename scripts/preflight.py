@@ -19,6 +19,7 @@ import re
 import stat
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 import yaml
@@ -410,6 +411,8 @@ def env_files(deca: Path | None, temporal: Path | None) -> None:
         check(not any(re.search(r"(PASSWORD|PWD|SECRET|TOKEN|_KEY)$", k) and v for k, v in env.items()),
               f"{label}: holds no secret values (secrets are files)")
         check(not any(k.startswith(WRITE_CREDENTIALS) for k in env), f"{label}: no Alibaba write credential")
+        # PGOPTIONS=-c role=... would let a privileged login pose as an app login (N8).
+        check(not any(k.startswith("PG") for k in env), f"{label}: no libpq PG* variables (N8)")
     if deca:
         env = parse_env(deca)
         check(_private_ip(env.get("DECA_BIND_IP", "")), "deca env: DECA_BIND_IP is a private, non-wildcard address")
@@ -459,11 +462,21 @@ def secrets_dir(path: Path) -> None:
             continue
         url = p.read_text().strip()
         check("sslmode=verify-full" in url, f"secrets: {name} uses sslmode=verify-full")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query, keep_blank_values=True)
+        check(not any(k.lower() == "options" for k in query),
+              f"secrets: {name} has no libpq options (N8: '-c role=' hides a privileged login)")
     users = []
     for name in APP_DSNS:
         m = re.match(r"^postgres(?:ql)?://([^:@/]+)", (path / name).read_text().strip()) if (path / name).exists() else None
         users.append(m.group(1) if m else None)
     check(None not in users and len(set(users)) == 3, "secrets: three distinct app DB logins (gateway, broker, auditor)")
+
+
+def owner_leftovers(tmp: Path) -> None:
+    """deca-owner-run.sh removes its directory on exit, but not after SIGKILL, OOM or power loss (N10)."""
+    left = sorted(p.name for p in tmp.glob("deca-owner.*"))
+    check(not left, f"owner: no leftover owner DSN directory in {tmp} (N10: shred, then rotate the owner password)"
+          + (f": {', '.join(left)}" if left else ""))
 
 
 def main() -> int:
@@ -495,6 +508,7 @@ def main() -> int:
         secrets_dir(a.secrets_dir)
     if a.pki_root:
         pki(a.pki_root, a.operator_cert)
+    owner_leftovers(Path(os.environ.get("DECA_OWNER_TMPDIR", "/dev/shm")))
     for status, msg in results:
         if status != "PASS" or os.environ.get("PREFLIGHT_VERBOSE"):
             print(f"{status}  {msg}")
