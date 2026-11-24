@@ -60,6 +60,8 @@ if [ "$(id -u)" = 0 ]; then
 fi
 chmod 0400 "$DIR/deca_db_url_owner"
 
+# DECA_OWNER_COMPOSE_OVERRIDE: optional extra compose file (the lab uses deploy/lab/docker-compose.owner.lab.yml).
+OVERRIDE=${DECA_OWNER_COMPOSE_OVERRIDE:-}
 DECA_OWNER_DSN_FILE="$DIR/deca_db_url_owner" \
-  docker compose -f "$REPO/deploy/deca/docker-compose.owner.yml" --env-file "$ENV_FILE" \
+  docker compose -f "$REPO/deploy/deca/docker-compose.owner.yml" ${OVERRIDE:+-f "$OVERRIDE"} --env-file "$ENV_FILE" \
   run --rm owner-job deca-soar "$@"

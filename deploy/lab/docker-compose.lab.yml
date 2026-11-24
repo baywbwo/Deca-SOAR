@@ -1,0 +1,161 @@
+# Lab overlay: the production stack of deploy/deca/docker-compose.yml on one VM, with stand-ins for what
+# phase 0 gets from Alibaba Cloud. Never use this file in production.
+#   docker compose -p deca-lab -f deploy/deca/docker-compose.yml -f deploy/lab/docker-compose.lab.yml \
+#     --env-file /etc/deca-soar/deca.env up -d
+# Stand-ins: postgres (RDS), temporal (the systemd Temporal host), synth (SLS detection results, synthetic),
+# the anchor file stays local (no Logtail/SLS). LLM triage stays mock. Additions for the owner: console
+# (read-only SOC view) behind a Cloudflare quick tunnel; nothing here publishes a host port.
+# Postgres, Temporal and the broker are reachable only inside the deca-lab network (review N1/N5).
+x-hardened: &hardened
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: {max-size: 20m, max-file: "3"}
+
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    command: ["postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/run/secrets/pg_tls_cert",
+              "-c", "ssl_key_file=/run/secrets/pg_tls_key", "-c", "hba_file=/run/secrets/pg_hba",
+              "-c", "password_encryption=scram-sha-256", "-c", "log_statement=none", "-c", "max_connections=200"]
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_superuser_password
+    secrets: [pg_tls_cert, pg_tls_key, pg_hba, pg_superuser_password]
+    volumes: [pgdata:/var/lib/postgresql]
+    networks:
+      deca: {ipv4_address: 172.30.124.11}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "/var/run/postgresql"]
+      interval: 10s
+      retries: 12
+    logging:
+      driver: json-file
+      options: {max-size: 20m, max-file: "3"}
+
+  temporal:
+    <<: *hardened
+    image: ${DECA_LAB_TEMPORAL_IMAGE:-deca-lab-temporal:1.32.2}
+    environment:
+      TEMPORAL_DB_PASSWORD_FILE: /etc/deca-soar/temporal/tls/db_password
+      LOG_LEVEL: warn
+      NUM_HISTORY_SHARDS: "4"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: temporal
+      SQL_TLS_ENABLED: "true"
+      SQL_HOST_VERIFICATION: "true"
+      SQL_CA: /etc/deca-soar/temporal/tls/server-ca.pem
+      SQL_HOST_NAME: postgres
+      BIND_ON_IP: 172.30.124.10
+      TEMPORAL_TLS_SERVER_CERT: /etc/deca-soar/temporal/tls/server.pem
+      TEMPORAL_TLS_SERVER_KEY: /etc/deca-soar/temporal/tls/server.key
+      TEMPORAL_TLS_CA_CERT: /etc/deca-soar/temporal/tls/server-ca.pem
+      TEMPORAL_TLS_SERVER_NAME: temporal.deca.internal
+      TEMPORAL_TLS_CLIENT_CA_CERT: /etc/deca-soar/temporal/tls/client-ca.pem
+      TEMPORAL_TLS_SYSTEM_WORKER_CERT: /etc/deca-soar/temporal/tls/system-worker.pem
+      TEMPORAL_TLS_SYSTEM_WORKER_KEY: /etc/deca-soar/temporal/tls/system-worker.key
+    volumes: ["/etc/deca-soar/lab/temporal:/etc/deca-soar/temporal/tls:ro"]
+    networks:
+      deca: {ipv4_address: 172.30.124.10}
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  broker:
+    environment:
+      # protected.yaml still holds the repo's RFC5737 placeholders and the synthetic alerts use
+      # TEST-NET addresses, both of which the broker refuses under DECA_ENV=production.
+      DECA_ENV: lab
+      DECA_ALLOW_TEST_NETS: "1"
+    secrets: [deca_db_ca]
+    ports: !reset []
+    networks:
+      deca: {ipv4_address: 172.30.124.12}
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  gateway:
+    secrets: [deca_db_ca]
+    depends_on:
+      postgres: {condition: service_healthy}
+      temporal: {condition: service_started}
+      synth: {condition: service_started}
+
+  worker:
+    depends_on:
+      temporal: {condition: service_started}
+      broker: {condition: service_started}
+
+  ledger-anchor:
+    secrets: [deca_db_ca]
+
+  synth:
+    <<: *hardened
+    image: ${DECA_SOAR_IMAGE:?e.g. deca-soar:<git-sha>}
+    command: ["deca-soar", "synth-alerts", "--out", "/data/replay/alerts.ndjson",
+              "--interval", "${DECA_LAB_SYNTH_INTERVAL_S:-90}"]
+    volumes: ["${DECA_REPLAY_DIR:?}:/data/replay"]
+    networks: [deca]
+
+  console:
+    <<: *hardened
+    image: ${DECA_SOAR_IMAGE:?e.g. deca-soar:<git-sha>}
+    command: ["uvicorn", "deca_soar.console.app:app", "--host", "0.0.0.0", "--port", "8300", "--no-server-header",
+              "--no-proxy-headers", "--ssl-certfile", "/run/secrets/console_tls_cert",
+              "--ssl-keyfile", "/run/secrets/console_tls_key"]
+    environment:
+      DECA_ENV: production
+      DECA_DB_URL_FILE: /run/secrets/deca_db_url_console
+      DECA_CONSOLE_PASSWORD_HASH_FILE: /run/secrets/console_password_hash
+      DECA_CONSOLE_USER: ${DECA_CONSOLE_USER:-owner}
+      # Only the tunnel may set the client address used by the login rate limit.
+      DECA_CONSOLE_TRUSTED_PROXIES: 172.30.124.30/32
+      DECA_CONSOLE_SYNTHETIC: "1"
+      DECA_GIT_SHA: ${DECA_GIT_SHA:-unknown}
+    secrets: [deca_db_url_console, deca_db_ca, console_password_hash, console_tls_cert, console_tls_key]
+    networks:
+      deca: {ipv4_address: 172.30.124.20}
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:8300/healthz',timeout=3,context=ssl._create_unverified_context())"]
+      interval: 30s
+
+  # Public HTTPS for the console without opening a port on the VM: a Cloudflare quick tunnel (free, no
+  # account; the trycloudflare URL changes on every restart). Origin TLS is verified against the lab CA.
+  tunnel:
+    <<: *hardened
+    image: cloudflare/cloudflared:2026.11.2@sha256:55c7e3e8d89d5e8d20b75a82f3602cbf98e06db406e73e282073cfdc5a9a3af6
+    command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "--url", "https://console:8300",
+              "--origin-ca-pool", "/run/secrets/console_ca", "--origin-server-name", "console"]
+    secrets: [console_ca]
+    networks:
+      deca: {ipv4_address: 172.30.124.30}
+    depends_on:
+      console: {condition: service_healthy}
+
+networks:
+  deca:
+    ipam:
+      config: [{subnet: 172.30.124.0/24}]
+
+volumes:
+  pgdata: {}
+
+secrets:
+  deca_db_ca: {file: /etc/deca-soar/tls/db-ca.pem}
+  deca_db_url_console: {file: /etc/deca-soar/secrets/deca_db_url_console}
+  console_password_hash: {file: /etc/deca-soar/secrets/console_password_hash}
+  console_tls_cert: {file: /etc/deca-soar/tls/console.pem}
+  console_tls_key: {file: /etc/deca-soar/secrets/console.key}
+  console_ca: {file: /etc/deca-soar/tls/console-ca.pem}
+  pg_tls_cert: {file: /etc/deca-soar/lab/postgres/server.pem}
+  pg_tls_key: {file: /etc/deca-soar/lab/postgres/server.key}
+  pg_hba: {file: /etc/deca-soar/lab/postgres/pg_hba.conf}
+  pg_superuser_password: {file: /etc/deca-soar/lab/postgres/superuser_password}
