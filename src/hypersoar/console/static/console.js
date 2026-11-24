@@ -70,6 +70,7 @@
   const n = v => (v === null || v === undefined ? "–" : fmt.format(v));
   const plural = (k, w) => `${n(k)} ${w}${k === 1 ? "" : "s"}`;
   const cap = s => (s ? s[0].toUpperCase() + s.slice(1) : "");
+  const lower = s => (s && !/^[A-Z0-9]{2}/.test(s) ? s[0].toLowerCase() + s.slice(1) : s || "");
   const BUCKET = { critical: "hi", high: "hi", medium: "md", low: "lo", info: "lo" };
   const bucket = s => BUCKET[s] || "lo";
   const sevTag = (p, sev) => el("span", { class: `sev ${sev || "low"}`, text: p ? `${p} ${sev}` : sev || "–" });
@@ -264,7 +265,7 @@
       [0, 1].forEach(i => sv("circle", { class: i ? "ring p p2" : "ring p", cx: target[0], cy: target[1], r: 10 }, gTgt));
       sv("circle", { cx: target[0], cy: target[1], r: 4, fill: "#f4f4f4" }, gTgt);
       sv("text", { x: target[0] + 14, y: target[1] + 22, text: entity ? entity.region_label : "Cloud region" }, gTgt);
-      sv("text", { x: target[0] + 14, y: target[1] + 36, class: "sub", text: entity ? `${entity.short || entity.id} · ${plural(entity.assets, "asset")}` : "" }, gTgt);
+      sv("text", { x: target[0] + 14, y: target[1] + 36, class: "sub", text: entity ? `${entity.region || entity.short} · ${plural(entity.assets, "asset")}` : "" }, gTgt);
     }
 
     function openDrawer(o, g) {
@@ -459,7 +460,7 @@
       txt("s-alerts", n(s.alerts_24h));
       txt("s-alerts-t", `${n(s.events_24h)} raw events behind them`);
       txt("s-cases", n(s.open_cases));
-      txt("s-cases-t", `${n(s.critical_cases)} critical · ${n(s.alerts_in_open)} alerts grouped`);
+      txt("s-cases-t", `${n(s.critical_cases)} critical · ${plural(s.alerts_in_open, "alert")} grouped`);
       txt("s-decisions", n(s.decisions_24h));
       txt("s-pending", n(s.pending));
       txt("s-pending-t", s.oldest_pending ? `Oldest waiting ${ago(s.oldest_pending)}` : "Nothing waiting");
@@ -791,11 +792,11 @@
       fill("aq", data.pending.length ? data.pending.map(q => el("li", { class: r && q.id === r.id ? "sel" : null },
         el("a", { href: `#${q.id}`, "aria-current": r && q.id === r.id ? "true" : null },
           el("span", { class: "id" }, el("span", { text: shortId(q.id) }), el("span", { text: q.expires_at ? `${span(left(q))} left` : "no expiry" })),
-          el("span", { class: "nm", text: `${q.action} · ${q.case_id || "no case"}` }))))
+          el("span", { class: "nm", text: requestTitle(q), title: `${q.action} · ${q.case_id || "no case"}` }))))
         : el("li", { class: "empty-note", text: "Nothing waiting." }));
       txt("aq-sub", `${n(data.pending.length)} waiting`);
       fill("recent", data.recent.length ? data.recent.map(x => el("li", {}, el("span", { class: "tm", text: when(x.at) }),
-        el("span", { class: "ev", text: `${cap(x.status)} · ${x.action}` }),
+        el("span", { class: "ev", text: `${cap(x.status)} · ${lower(requestTitle(x))}` }),
         el("span", { class: "mono", text: `${x.case_id || "–"}${x.reason ? ` · ${x.reason}` : ""}` })))
         : el("li", {}, el("span", { class: "ev k", text: "No decision yet." })));
       if (!r) {

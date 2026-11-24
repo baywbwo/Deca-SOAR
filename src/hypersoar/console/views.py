@@ -394,7 +394,7 @@ def approvals(conn, inst: dict) -> dict:
         " WHERE q.entity_id = %s AND q.status = 'pending_approval' AND (q.expires_at IS NULL OR q.expires_at > now())"
         " ORDER BY q.expires_at NULLS LAST, q.created_at LIMIT 20", (e,)).fetchall()
     recent = conn.execute(
-        "SELECT action, status, case_id, created_at, expires_at, reasons FROM broker.action_request"
+        "SELECT action, status, case_id, created_at, expires_at, reasons, would_execute FROM broker.action_request"
         " WHERE entity_id = %s AND level IN ('L2', 'L3')"
         " AND (status <> 'pending_approval' OR expires_at <= now())"
         " ORDER BY coalesce(expires_at, created_at) DESC LIMIT 6", (e,)).fetchall()
@@ -414,7 +414,7 @@ def approvals(conn, inst: dict) -> dict:
                     "ai": {"verdict": _clip(ai.get("verdict"), 20), "confidence": ai.get("confidence"),
                            "model": _clip(ai.get("model"), 40)}})
     return {"pending": out, "ladder": ladder,
-            "recent": [{"action": _clip(r["action"], 64), "case_id": r["case_id"],
+            "recent": [{"action": _clip(r["action"], 64), "would_execute": _clip(r["would_execute"]), "case_id": r["case_id"],
                         "status": "expired" if r["status"] == "pending_approval" else r["status"],
                         "at": _iso(r["expires_at"] or r["created_at"]),
                         "reason": _clip((r["reasons"] or [None])[0], 80)} for r in recent]}
@@ -422,7 +422,8 @@ def approvals(conn, inst: dict) -> dict:
 
 def _evidence(v) -> list[str]:
     if isinstance(v, dict):
-        out = [f"{len(v.get('alert_ids') or [])} alerts in the case"]
+        k = len(v.get("alert_ids") or [])
+        out = [f"{k} alert{'' if k == 1 else 's'} in the case"]
         if v.get("tokens"):
             out.append("Tokens: " + ", ".join(_clip(t, 24) for t in v["tokens"][:6]))
         return out

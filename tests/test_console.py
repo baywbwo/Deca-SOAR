@@ -266,6 +266,28 @@ def test_production_marks_pages_and_hides_scenarios(console):
         console_env_install.get = real
 
 
+def test_entity_names_follow_the_install_mode_not_the_container_env(console_env):
+    # Lab containers carry HYPERSOAR_ENV=production and no HYPERSOAR_MODE; the console reads the entity file
+    # for the database's mode, so the header still says the company name instead of the bare id.
+    console_env.setenv("HYPERSOAR_ENV", "production")
+    console_env.delenv("HYPERSOAR_MODE", raising=False)
+    from hypersoar.console.app import app
+    with TestClient(app, base_url="https://testserver") as c:
+        assert "Security orchestration console · PT Delta Omega Beta" in c.get("/login").text
+        assert _login(c).status_code == 303
+        ent = c.get("/api/shell").json()["entity"]
+    assert ent["name"] == "PT Delta Omega Beta" and ent["id"] == "dob"
+    assert ent["region_label"] == "Alibaba Cloud Jakarta" and ent["region"] == "ap-southeast-5"
+    assert ent["assets"] == 7 and set(ent) == {"id", "name", "short", "timezone", "region", "region_label",
+                                               "map_xy", "assets"}
+
+
+def test_evidence_counts_alerts_in_the_right_number():
+    from hypersoar.console.views import _evidence
+    assert _evidence({"alert_ids": ["a"]}) == ["1 alert in the case"]
+    assert _evidence({"alert_ids": ["a", "b"]}) == ["2 alerts in the case"]
+
+
 def test_no_write_endpoints():
     from hypersoar.console.app import fastapi_app
     writes = sorted((r.path, m) for r in fastapi_app.routes for m in getattr(r, "methods", set()) - {"GET", "HEAD"})
@@ -340,6 +362,8 @@ def test_new_api_shapes_and_no_raw_addresses(client, principals, pool, settings,
     assert cases and all(d.status_code == 200 for d in details)
     d = details[0].json()
     assert {"case", "alerts", "steps", "ai", "trace", "requests", "calls", "also_in"} <= set(d)
+    ap = out["/api/approvals"].json()
+    assert all("would_execute" in x for x in ap["recent"])
     auto = out["/api/automation"].json()
     assert auto["catalog_loaded"] is True and auto["ledger"]["tail"]
     for p, r in [*out.items(), *(("detail", x) for x in details)]:

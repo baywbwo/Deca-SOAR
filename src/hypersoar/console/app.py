@@ -88,7 +88,7 @@ async def lifespan(app: FastAPI):
     app.state.limiter = LoginLimiter()
     app.state.ledger = queries.LedgerStatus()
     app.state.install = InstallInfo()
-    app.state.entity = _entity_public()
+    app.state.entity = {}
     app.state.catalog = _catalog_public()
     db_url = read_secret("HYPERSOAR_DB_URL")
     pool = ConnectionPool(db_url, min_size=1, max_size=4, configure=_configure,
@@ -119,15 +119,20 @@ class InstallInfo:
             return self._value
 
 
-def _entity_public() -> dict | None:
-    """Display fields of the entity file. No targets, accounts or integration settings leave here."""
-    try:
-        e = entity_mod.load()
-    except ConfigError as exc:
-        log.warning("console: entity file not loaded (%s); header shows the entity id only", exc)
-        return None
-    return {"id": e.id, "name": e.name, "short": e.short, "timezone": e.timezone, "region_label": e.region_label,
-            "map_xy": list(e.map_xy), "assets": len(e.assets)}
+def _entity_public(cache: dict, mode: str) -> dict | None:
+    """Display fields of the entity file, read for the install's mode (the database marker, not HYPERSOAR_MODE:
+    the console has no mode of its own). No targets, accounts or integration settings leave here."""
+    if mode not in cache:
+        try:
+            e = entity_mod.load(mode=mode)
+        except ConfigError as exc:
+            log.warning("console: entity file not loaded (%s); header shows the entity id only", exc)
+            cache[mode] = None
+        else:
+            cache[mode] = {"id": e.id, "name": e.name, "short": e.short, "timezone": e.timezone,
+                           "region": e.region, "region_label": e.region_label, "map_xy": list(e.map_xy),
+                           "assets": len(e.assets)}
+    return cache[mode]
 
 
 def _catalog_public() -> list[dict] | None:
@@ -183,7 +188,7 @@ def _login_page(request: Request, status: int = 200, msg: str | None = None) -> 
         mode = st.install.get(st.pool)["mode"]
     except Exception:  # the sign-in page must render even when the database is away
         mode = "sandbox"
-    name = html.escape((st.entity or {}).get("name") or "")
+    name = html.escape((_entity_public(st.entity, mode) or {}).get("name") or "")
     eyebrow = "Security orchestration console" + (f" · {name}" if name else "")
     flags = ('<span class="flag">Synthetic data</span>' if st.synthetic else "") + (
         '<span class="env prd">Production</span>' if mode == "production" else '<span class="env sbx">Sandbox</span>')
@@ -307,7 +312,7 @@ def api_shell(request: Request):
 
     def build(conn, inst, s):
         return {**views.shell(conn, inst), "mode": inst["mode"], "entity_id": inst["entity_id"],
-                "entity": st.entity if st.entity and st.entity["id"] == inst["entity_id"] else None,
+                "entity": ent if (ent := _entity_public(st.entity, inst["mode"])) and ent["id"] == inst["entity_id"] else None,
                 "kill_switch": queries.kill_switch(conn), "ledger": st.ledger.get(conn),
                 "meta": {"synthetic": st.synthetic, "sha": st.sha, "user": s.user, "mode": "shadow",
                          "read_only": True},
