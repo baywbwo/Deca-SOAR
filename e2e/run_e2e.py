@@ -460,17 +460,49 @@ def deca_cli(st: Stack, env: dict, *args: str, ok=(0, 1)) -> dict:
     return {"rc": r.returncode, **(json.loads(lines[-1]) if lines and lines[-1].startswith("{") else {})}
 
 
+def owner_run(st: Stack, base: dict, owner_dsn: Path, *args: str) -> None:
+    """RUNBOOK 5 / review N2: owner jobs go through deca-owner-run.sh. A stand-in `docker` runs the
+    job with this checkout instead of the image and records the mode of the per-run DSN file."""
+    shim = st.run / "owner-shim"
+    if not shim.exists():
+        shim.mkdir(mode=0o700)
+        (st.run / "owner-tmp").mkdir(mode=0o700)
+        (shim / "docker").write_text(f"""#!/bin/sh
+# stand-in for: docker compose -f docker-compose.owner.yml --env-file F run --rm owner-job deca-soar ARGS
+while [ $# -gt 0 ] && [ "$1" != owner-job ]; do shift; done
+shift 2
+stat -c %a "$DECA_OWNER_DSN_FILE" >> {st.run}/owner-shim.modes
+DECA_DB_URL_FILE="$DECA_OWNER_DSN_FILE" exec {DECA_PY} -m deca_soar.cli "$@"
+""")
+        (shim / "docker").chmod(0o700)
+    env = {**base, "PATH": f"{shim}:{base['PATH']}", "DECA_OWNER_TMPDIR": str(st.run / "owner-tmp"),
+           "DECA_SECRETS_DIR": str(st.sec), "DECA_ENV_FILE": "/dev/null"}
+    r = subprocess.run(["sh", str(REPO / "deploy/deca/bin/deca-owner-run.sh"), *args], input=owner_dsn.read_text(),
+                       env=env, capture_output=True, text=True, timeout=120)
+    with (st.logs / "deca-cli.log").open("a") as f:
+        f.write(r.stdout + r.stderr)
+    if r.returncode != 0:
+        raise RuntimeError(f"deca-owner-run.sh {args[0]} failed ({r.returncode}): {r.stderr[-1500:]}")
+
+
 def setup_deca(st: Stack, pki: PKI, pg: dict) -> dict:
     base = {"PATH": os.environ["PATH"], "HOME": str(st.run), "DECA_ENV": "e2e",
             "DECA_POLICY_DIR": str(REPO / "policy"), "DECA_MIGRATIONS_DIR": str(REPO / "migrations")}
+    # The owner DSN lives in the operator's vault, not in the host secrets dir (review N2). The e2e keeps
+    # it here so the guard probes and the F3/N2 rewrite can play an attacker who stole it.
+    ops_vault = st.run / "ops-vault"
+    ops_vault.mkdir(mode=0o700)
+    owner_dsn = ops_vault / "deca_db_url_owner"
+    owner_dsn.write_text(db_url(st, pki, "deca_owner", pg["owner"]) + "\n")
+    owner_dsn.chmod(0o600)
     urls = {
-        "owner": st.secret_file("deca_db_url_owner", db_url(st, pki, "deca_owner", pg["owner"])),
+        "owner": owner_dsn,
         "gateway": st.secret_file("deca_db_url_gateway", db_url(st, pki, "deca_gw", pg["gw"])),
         "broker": st.secret_file("deca_db_url_broker", db_url(st, pki, "deca_brk", pg["brk"])),
         "auditor": st.secret_file("deca_db_url_auditor", db_url(st, pki, "deca_aud", pg["aud"])),
     }
     owner = {**base, "DECA_DB_URL_FILE": str(urls["owner"])}
-    deca_cli(st, owner, "migrate", ok=(0,))
+    owner_run(st, base, owner_dsn, "migrate")
     # RUNBOOK step 2: login users that are members of the NOLOGIN group roles the migration created.
     with psycopg.connect(st.run_admin, autocommit=True) as c:
         for user, group, k in (("deca_gw", "deca_soar_gateway", "gw"), ("deca_brk", "deca_soar_broker", "brk"),
@@ -488,8 +520,8 @@ def setup_deca(st: Stack, pki: PKI, pg: dict) -> dict:
     }
     kf = {k: st.secret_file(k, v) for k, v in keys.items()}
     tok_file = st.sec / "deca_broker_worker_token"
-    deca_cli(st, owner, "create-principal", "--name", "temporal-worker", "--kind", "service", "--role", "analyst",
-             "--token-file", str(tok_file), ok=(0,))
+    owner_run(st, base, owner_dsn, "create-principal", "--name", "temporal-worker", "--kind", "service",
+              "--role", "analyst", "--token-file", str(tok_file))
     st.secret(tok_file.read_text().strip())
 
     b_cert, b_key = pki.leaf("broker", ca=pki.server_ca, dns=["broker.deca.internal"], ips=[HOST], server=True)
@@ -558,6 +590,32 @@ def guard_probes(st: Stack, denv: dict, summary: dict) -> None:
     summary["checks"]["app_roles_cannot_insert_ledger_seq"] = all(seq.values())
 
 
+def owner_dsn_probe(st: Stack, summary: dict) -> None:
+    """Review N2: the owner DSN existed only as a 0400 tmpfs file during each owner job."""
+    import importlib.util  # noqa: PLC0415
+
+    spec = importlib.util.spec_from_file_location("preflight", REPO / "scripts/preflight.py")
+    pf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pf)
+    pf.secrets_dir(st.sec)
+    modes = (st.run / "owner-shim.modes").read_text().split()
+    summary["owner_dsn"] = {"job_file_modes": modes, "left_in_tmp": sorted(p.name for p in (st.run / "owner-tmp").iterdir()),
+                            "preflight_secrets": [f"{s} {m}" for s, m in pf.results if s != "PASS"]}
+    summary["checks"]["owner_dsn_only_during_owner_jobs"] = (
+        modes == ["400", "400"] and not summary["owner_dsn"]["left_in_tmp"]
+        and not (st.sec / "deca_db_url_owner").exists() and not summary["owner_dsn"]["preflight_secrets"]
+        and ("PASS", "secrets: no owner DSN stored on the host (N2; owner jobs use deca-owner-run.sh)") in pf.results)
+
+
+def ship_anchors(anchor_file: Path, export: Path) -> None:
+    """Mock Logtail -> SLS export: string fields plus the raw line in `content` (layout unverified on SLS)."""
+    with export.open("w") as f:
+        for line in anchor_file.read_text().splitlines():
+            rec = json.loads(line)
+            f.write(json.dumps({"__source__": HOST, "__time__": str(int(time.time())), "content": line,
+                                **{k: "" if v is None else str(v) for k, v in rec.items()}}) + "\n")
+
+
 def owner_conn(denv: dict) -> psycopg.Connection:
     return psycopg.connect(Path(denv["owner"]["DECA_DB_URL_FILE"]).read_text().strip(), autocommit=True)
 
@@ -577,6 +635,7 @@ def scenario(st: Stack, summary: dict) -> int:
     mtls_probes(st, pki, summary)
     temporal_http_probe(st, summary)
     denv = setup_deca(st, pki, pg)
+    owner_dsn_probe(st, summary)
     P = st.ports
 
     # The worker refuses to start with database or vault credentials (review F5 / design 6.3).
@@ -819,12 +878,16 @@ def ledger_and_f3(st: Stack, denv: dict, summary: dict) -> None:
         except psycopg.errors.InsufficientPrivilege:
             summary["checks"]["f5_gateway_cannot_read_vault_ciphertext"] = True
 
-    # F3: the daily anchor (auditor role) and detection of a rewrite with the owner credential.
+    # F3: the hourly anchor (auditor role) and detection of a rewrite with the owner credential.
     anchors = st.run / "anchors" / "ledger-anchors.ndjson"
     anchors.parent.mkdir(mode=0o700)
     a1 = deca_cli(st, denv["auditor"], "anchor-ledger", "--sink", f"file:{anchors}")
     summary["checks"]["f3_anchor_written_by_auditor"] = a1["rc"] == 0 and anchors.exists() \
         and anchors.stat().st_mode & 0o777 == 0o600
+    offhost = st.run / "sls-mock" / "ledger-anchor.ndjson"  # N2: what Logtail shipped off the host
+    offhost.parent.mkdir(mode=0o700)
+    ship_anchors(anchors, offhost)
+    offhost_before = deca_cli(st, denv["auditor"], "verify-ledger", "--anchors", f"sls-export:{offhost}")
     with owner_conn(denv) as c, c.transaction():
         c.execute("ALTER TABLE ledger.entry DISABLE TRIGGER USER")
         c.execute("DELETE FROM ledger.entry WHERE seq = (SELECT min(seq) FROM ledger.entry)")
@@ -840,6 +903,19 @@ def ledger_and_f3(st: Stack, denv: dict, summary: dict) -> None:
     summary["f3_owner_rewrite"] = {"chain_only_ok": chain_only.get("ok"), "with_anchors_ok": with_anchor.get("ok"),
                                    "errors": with_anchor.get("errors")}
     summary["checks"]["f3_anchor_detects_owner_rewrite"] = with_anchor["rc"] == 1 and with_anchor.get("ok") is False
+
+    # N2: root also rewrites the host anchor file to match; only the off-host copy still disagrees.
+    forged = anchors.parent / "forged.ndjson"
+    a2 = deca_cli(st, denv["auditor"], "anchor-ledger", "--sink", f"file:{forged}")
+    os.replace(forged, anchors)
+    host_only = deca_cli(st, denv["auditor"], "verify-ledger", "--anchors", f"file:{anchors}")
+    offhost_after = deca_cli(st, denv["auditor"], "verify-ledger", "--anchors", f"sls-export:{offhost}")
+    summary["n2_root_rewrite"] = {"offhost_before_ok": offhost_before.get("ok"), "forged_anchor_rc": a2["rc"],
+                                  "host_file_ok": host_only.get("ok"), "offhost_ok": offhost_after.get("ok"),
+                                  "errors": offhost_after.get("errors")}
+    summary["checks"]["n2_offhost_anchor_detects_root_rewrite"] = (
+        offhost_before["rc"] == 0 and a2["rc"] == 0 and host_only["rc"] == 0 and host_only.get("ok") is True
+        and offhost_after["rc"] == 1 and offhost_after.get("ok") is False)
 
 
 if __name__ == "__main__":

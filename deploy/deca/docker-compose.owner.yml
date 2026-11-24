@@ -1,0 +1,26 @@
+# Owner-DSN jobs (review N2): `deca-soar migrate` and `create-principal`, the only commands that need the
+# role owning the DECA schema. Kept out of docker-compose.yml so `up` can never start it and no service
+# there references the owner secret. Always run through deploy/deca/bin/deca-owner-run.sh, which mounts
+# the DSN from a tmpfs file for one `run --rm` and deletes it afterwards.
+services:
+  owner-job:
+    image: ${DECA_SOAR_IMAGE:?e.g. deca-soar:<git-sha>}
+    restart: "no"
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    command: ["deca-soar", "migrate"]
+    environment:
+      DECA_ENV: production
+      DECA_DB_URL_FILE: /run/secrets/deca_db_url_owner
+    secrets: [deca_db_url_owner]
+    volumes:
+      # create-principal writes the new service token here (0600, uid 10001); empty otherwise.
+      - ${DECA_OWNER_OUT_DIR:-/etc/deca-soar/out}:/out
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
+
+secrets:
+  deca_db_url_owner: {file: "${DECA_OWNER_DSN_FILE:?run this file through deploy/deca/bin/deca-owner-run.sh}"}

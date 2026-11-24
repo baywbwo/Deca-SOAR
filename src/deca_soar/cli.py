@@ -57,6 +57,8 @@ def cmd_verify_ledger(a: argparse.Namespace) -> int:
     with psycopg.connect(_db_url(), row_factory=dict_row) as conn:
         r = ledger.verify(conn)
         anchor_errors = ledger.check_anchors(conn, anchors)
+    if a.anchors and not any(x.get("head_seq") is not None for x in anchors):
+        anchor_errors.append("no anchored head to compare with (empty or missing anchor source)")
     ok = r.ok and not anchor_errors
     print(json.dumps({"ok": ok, "entries": r.entries, "head_seq": r.head_seq, "head_hash": r.head_hash,
                       "anchors_checked": len(anchors), "errors": r.errors + anchor_errors}))
@@ -113,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--token-file", required=True, help="new 0600 file that receives the bearer token")
     cp.set_defaults(fn=cmd_create_principal)
     vl = sub.add_parser("verify-ledger")
-    vl.add_argument("--anchors", help="also compare with anchors from this sink (file:<path>)")
+    vl.add_argument("--anchors", help="also compare with anchors from file:<path> or an off-host copy, sls-export:<path>")
     vl.set_defaults(fn=cmd_verify_ledger)
     al = sub.add_parser("anchor-ledger")
     al.add_argument("--sink", required=True, help="file:<path> (phase 0) or sls:<project>/<logstore> (untested)")

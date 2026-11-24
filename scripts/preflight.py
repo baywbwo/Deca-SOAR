@@ -5,6 +5,7 @@
   python scripts/preflight.py --temporal-bin /opt/temporal/1.32.2  # plus render the Temporal config, verify binaries
   python scripts/preflight.py --env /etc/deca-soar/deca.env --temporal-env /etc/deca-soar/temporal/temporal.env \
       --secrets-dir /etc/deca-soar/secrets                      # plus the production files on the host
+  python scripts/preflight.py --pki-root /etc/deca-soar [--operator-cert op.pem]  # N1 client-CA controls
 Exit code 0 = pass, 1 = at least one FAIL.
 """
 
@@ -24,12 +25,23 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DECA_COMPOSE = ROOT / "deploy/deca/docker-compose.yml"
+OWNER_COMPOSE = ROOT / "deploy/deca/docker-compose.owner.yml"
+OWNER_RUN = ROOT / "deploy/deca/bin/deca-owner-run.sh"
+LOGTAIL_CONFIG = ROOT / "deploy/deca/sls/ledger-anchor.logtail.yaml"
+ANCHOR_TIMER = ROOT / "deploy/deca/systemd/deca-ledger-anchor.timer"
+ANCHOR_FILE = "/var/lib/deca-soar/anchors/ledger-anchors.ndjson"
+APP_DSNS = ("deca_db_url_gateway", "deca_db_url_broker", "deca_db_url_auditor")
+# N1 compensating controls (no Temporal authorizer yet): every client-CA certificate is a Temporal admin,
+# so the client CA is dedicated, signs only these certificates, and each lives at most 90 days.
+PKI_CLIENT_CA = "temporal/tls/client-ca.pem"
+PKI_OTHER_CAS = ("temporal/tls/server-ca.pem", "tls/broker-ca.pem")
+PKI_CLIENT_CERTS = ("tls/temporal-gateway.pem", "tls/temporal-worker.pem", "temporal/tls/system-worker.pem")
+CLIENT_CERT_MAX_DAYS = 90
 TEMPORAL_DIR = ROOT / "deploy/temporal"
 RETIRED_ENGINE = "trace" + "cat"  # the phase-0 engine this build replaced; must not come back
 WRITE_CREDENTIALS = ("ALIBABA_CLOUD_ACCESS_KEY", "ALICLOUD_ACCESS_KEY", "ALICLOUD_SECRET_KEY", "DECA_SOAR_ACTOR_ROLE_ARN")
-# Which secrets each service may hold (least privilege, review F3/F5).
+# Which secrets each service may hold (least privilege, review F3/F5). The owner DSN is in none of them (N2).
 SECRET_ALLOWLIST = {
-    "deca-migrate": {"deca_db_url_owner"},
     "broker": {"deca_db_url_broker", "deca_vault_private_key", "broker_tls_cert", "broker_tls_key"},
     "gateway": {"deca_db_url_gateway", "deca_tokenization_key", "deca_vault_public_key", "deca_temporal_payload_key",
                 "temporal_server_ca", "temporal_gateway_cert", "temporal_gateway_key"},
@@ -114,6 +126,41 @@ def static_deca_compose() -> None:
         check(all(env.get(k) for k in ("DECA_TEMPORAL_TLS_CA_FILE", "DECA_TEMPORAL_TLS_CERT_FILE", "DECA_TEMPORAL_TLS_KEY_FILE")),
               f"deca compose: {name} uses mTLS to Temporal")
         check(bool(env.get("DECA_TEMPORAL_PAYLOAD_KEY_FILE")), f"deca compose: {name} encrypts Temporal payloads")
+
+
+def static_owner_dsn(compose: Path = DECA_COMPOSE, owner_compose: Path = OWNER_COMPOSE, runner: Path = OWNER_RUN) -> None:
+    """Review N2: the owner DSN is never a standing secret; it exists only for one owner job."""
+    check("deca_db_url_owner" not in compose.read_text(), "deca compose: never references the owner DSN (N2)")
+    doc = yaml.safe_load(owner_compose.read_text())
+    svcs = doc.get("services") or {}
+    job = svcs.get("owner-job") or {}
+    check(list(svcs) == ["owner-job"] and job.get("restart") == "no", "owner compose: a single one-shot owner-job")
+    check(job.get("secrets") == ["deca_db_url_owner"] and list(doc.get("secrets") or {}) == ["deca_db_url_owner"],
+          "owner compose: holds only the owner DSN")
+    src = str(((doc.get("secrets") or {}).get("deca_db_url_owner") or {}).get("file", ""))
+    check(src.startswith("${DECA_OWNER_DSN_FILE:?"), "owner compose: owner DSN comes from the per-run temp file only")
+    check(job.get("read_only") is True and job.get("cap_drop") == ["ALL"] and not job.get("ports"),
+          "owner compose: owner-job hardened, no ports")
+    sh = runner.read_text() if runner.exists() else ""
+    check(bool(sh) and os.access(runner, os.X_OK) and 'trap \'rm -rf "$DIR"\' EXIT' in sh and "umask 077" in sh
+          and "deca_db_url_owner\" ]" in sh and "/dev/shm" in sh,
+          "owner runner: tmpfs file, removed on exit, refuses a stored owner DSN")
+
+
+def static_anchor_shipping(compose: Path = DECA_COMPOSE, logtail: Path = LOGTAIL_CONFIG, timer: Path = ANCHOR_TIMER) -> None:
+    """Review N2: every anchor line leaves the host (Logtail -> SLS)."""
+    job = yaml.safe_load(compose.read_text())["services"].get("ledger-anchor") or {}
+    check(f"file:{ANCHOR_FILE}" in (job.get("command") or []), "anchor job: writes the shipped anchor file")
+    cfg = yaml.safe_load(logtail.read_text()) if logtail.exists() else {}
+    paths = [p for i in cfg.get("inputs") or [] if i.get("Type") == "input_file" for p in i.get("FilePaths") or []]
+    flush = [f for f in cfg.get("flushers") or [] if f.get("Type") == "flusher_sls"]
+    check(paths == [ANCHOR_FILE] and len(flush) == 1 and bool(flush[0].get("Logstore")),
+          "logtail: ships the anchor file to an SLS logstore")
+    check(any(p.get("KeepingSourceWhenParseSucceed") is True for p in cfg.get("processors") or []),
+          "logtail: keeps the original anchor line (content) for verification")
+    check(False, "logtail: config not yet applied or tested against SLS (mock shipper in e2e only)", warn=True)
+    t = timer.read_text()
+    check(re.search(r"^OnCalendar=\*-\*-\* \*:\d\d:00\s*$", t, re.M) is not None, "anchor timer: hourly")
 
 
 def static_temporal() -> None:
@@ -239,6 +286,92 @@ def base_image(production: bool, deca_env: Path | None, dockerfile: Path = ROOT 
           warn=not production)
 
 
+def _load_cert(path: Path):
+    from cryptography import x509
+
+    try:
+        return x509.load_pem_x509_certificate(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+
+
+def _spki(obj) -> bytes:
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    return obj.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+
+
+def _signed_by(cert, ca) -> bool:
+    try:
+        cert.verify_directly_issued_by(ca)
+        return True
+    except Exception:  # noqa: BLE001 - InvalidSignature, mismatched key type
+        return False
+
+
+def pki(root: Path, operator_cert: Path | None = None, now=None) -> None:
+    """Review N1: dedicated Temporal client CA, only the expected certificates, each valid <= 90 days."""
+    import datetime as dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    from cryptography.x509.oid import ExtendedKeyUsageOID
+
+    now = now or dt.datetime.now(dt.timezone.utc)
+    ca = _load_cert(root / PKI_CLIENT_CA)
+    check(ca is not None, f"pki: {PKI_CLIENT_CA} readable")
+    if ca is None:
+        return
+    try:
+        is_ca = ca.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+    except x509.ExtensionNotFound:
+        is_ca = False
+    check(is_ca, "pki: Temporal client CA is a CA certificate")
+    for other in PKI_OTHER_CAS:
+        o = _load_cert(root / other)
+        check(o is not None and _spki(o) != _spki(ca) and o.subject != ca.subject,
+              f"pki: Temporal client CA is dedicated (not {other})")
+    leaves = [root / c for c in PKI_CLIENT_CERTS] + ([operator_cert] if operator_cert else [])
+    seen = []
+    for path in leaves:
+        cert = _load_cert(path)
+        label = path.name
+        if cert is None:
+            check(False, f"pki: {label} readable")
+            continue
+        try:
+            eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        except x509.ExtensionNotFound:
+            eku = []
+        try:
+            leaf_ca = cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+        except x509.ExtensionNotFound:
+            leaf_ca = False
+        days = (cert.not_valid_after_utc - cert.not_valid_before_utc).total_seconds() / 86400
+        check(cert.issuer == ca.subject and _signed_by(cert, ca), f"pki: {label} issued by the Temporal client CA")
+        check(not leaf_ca and ExtendedKeyUsageOID.CLIENT_AUTH in eku, f"pki: {label} is a clientAuth leaf, not a CA")
+        check(days <= CLIENT_CERT_MAX_DAYS, f"pki: {label} validity <= {CLIENT_CERT_MAX_DAYS} days ({days:.0f})")
+        check(cert.not_valid_before_utc <= now < cert.not_valid_after_utc, f"pki: {label} currently valid")
+        seen.append(f"{label} serial {cert.serial_number:x} until {cert.not_valid_after_utc:%Y-%m-%d}")
+    check(False, "pki: compare with the client-CA issuance register (only gateway, worker, system-worker, operator): "
+          + "; ".join(seen), warn=True)
+    found = []
+    for f in sorted(p for p in root.rglob("*") if p.is_file()):
+        try:
+            data = f.read_bytes()
+        except OSError:
+            continue
+        if b"PRIVATE KEY-----" not in data:
+            continue
+        try:
+            key = load_pem_private_key(data, password=None)
+        except (TypeError, ValueError):
+            continue  # encrypted or not a key this check can open
+        if _spki(key) == _spki(ca):
+            found.append(str(f.relative_to(root)))
+    check(not found, "pki: Temporal client CA private key is not on this host" + (f" (found {found})" if found else ""))
+
+
 def parse_env(path: Path) -> dict[str, str]:
     env: dict[str, str] = {}
     for line in path.read_text().splitlines():
@@ -317,7 +450,9 @@ def secrets_dir(path: Path) -> None:
         check(pub.public_bytes(Encoding.Raw, PublicFormat.Raw) == keys["deca_vault_public_key"],
               "secrets: vault public key matches the private key")
     check(len(set(keys.values())) == len(keys), "secrets: keys are distinct")
-    for name in ("deca_db_url_owner", "deca_db_url_gateway", "deca_db_url_broker", "deca_db_url_auditor"):
+    check(not (path / "deca_db_url_owner").exists(),
+          "secrets: no owner DSN stored on the host (N2; owner jobs use deca-owner-run.sh)")
+    for name in APP_DSNS:
         p = path / name
         if not p.exists():
             check(False, f"secrets: {name} present")
@@ -325,10 +460,10 @@ def secrets_dir(path: Path) -> None:
         url = p.read_text().strip()
         check("sslmode=verify-full" in url, f"secrets: {name} uses sslmode=verify-full")
     users = []
-    for name in ("deca_db_url_owner", "deca_db_url_gateway", "deca_db_url_broker", "deca_db_url_auditor"):
+    for name in APP_DSNS:
         m = re.match(r"^postgres(?:ql)?://([^:@/]+)", (path / name).read_text().strip()) if (path / name).exists() else None
         users.append(m.group(1) if m else None)
-    check(None not in users and len(set(users)) == 4, "secrets: four distinct DB logins (owner, gateway, broker, auditor)")
+    check(None not in users and len(set(users)) == 3, "secrets: three distinct app DB logins (gateway, broker, auditor)")
 
 
 def main() -> int:
@@ -337,12 +472,16 @@ def main() -> int:
     ap.add_argument("--env", type=Path, help="production deca.env")
     ap.add_argument("--temporal-env", type=Path, help="production temporal.env")
     ap.add_argument("--secrets-dir", type=Path)
+    ap.add_argument("--pki-root", type=Path, help="/etc/deca-soar: check the N1 client-CA controls")
+    ap.add_argument("--operator-cert", type=Path, help="operator client certificate (public part) to include")
     ap.add_argument("--production", action="store_true",
                     help="production gate: placeholders FAIL instead of WARN (implied by --env/--secrets-dir)")
     a = ap.parse_args()
     production = a.production or bool(a.env or a.secrets_dir)
     static_repo()
     static_deca_compose()
+    static_owner_dsn()
+    static_anchor_shipping()
     static_locks()
     base_image(production, a.env)
     static_temporal()
@@ -354,6 +493,8 @@ def main() -> int:
         env_files(a.env, a.temporal_env)
     if a.secrets_dir:
         secrets_dir(a.secrets_dir)
+    if a.pki_root:
+        pki(a.pki_root, a.operator_cert)
     for status, msg in results:
         if status != "PASS" or os.environ.get("PREFLIGHT_VERBOSE"):
             print(f"{status}  {msg}")

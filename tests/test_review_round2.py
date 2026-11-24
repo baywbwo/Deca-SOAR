@@ -1,17 +1,26 @@
 """Regression tests for the second security review (09-security-review-fase0.md, "Review ulang @ 04c034b")."""
 
+import json
+import os
+import stat
+import subprocess
+from pathlib import Path
+
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from psycopg import errors
 from psycopg.rows import dict_row
 
-from deca_soar import cli
+from deca_soar import cli, ledger
 from deca_soar.common.config import ConfigError
 from deca_soar.common.dbguard import assert_least_privilege_login, login_problems
 from deca_soar.common.pii import vault_public_key
+from deca_soar.ledger.anchor import SinkError, SlsExport, open_sink
 
 from conftest import make_login
+from helpers import ingest, waf_alert
+from test_review_fixes import _owner_rewrite
 from test_broker_api import env, principals  # noqa: F401  (fixtures)
 
 SERVICES = ("gateway", "broker", "auditor")
@@ -135,3 +144,150 @@ def test_n7_explicit_seq_insert_refused(roles, who):
                       " VALUES (1000000, 'x', 'x', '{}', '{}', repeat('0', 64), repeat('1', 64))")
         c.execute("INSERT INTO ledger.entry (event_type, actor, payload, canonical, prev_hash, hash)"
                   " VALUES ('n7', 'x', '{}', '{}', repeat('0', 64), repeat('2', 64))")
+
+
+# N2: anchors leave the host; the owner DSN is never stored ---------------------------------------
+
+REPO = Path(__file__).resolve().parents[1]
+OWNER_RUN = REPO / "deploy/deca/bin/deca-owner-run.sh"
+
+
+def _ship(anchor_file: Path, export: Path, *, as_array: bool = False) -> None:
+    """Mock Logtail -> SLS: each anchor line becomes a log with string fields plus the raw `content`."""
+    logs = []
+    for line in anchor_file.read_text().splitlines():
+        rec = json.loads(line)
+        logs.append({"__source__": "10.0.0.5", "__time__": "1764000000", "content": line,
+                     **{k: "" if v is None else str(v) for k, v in rec.items()}})
+    export.write_text(json.dumps(logs) if as_array else "".join(json.dumps(x) + "\n" for x in logs))
+
+
+def test_n2_sls_export_formats(tmp_path):
+    rec = {"v": 1, "head_seq": 7, "head_hash": "ab" * 32, "entries": 7, "anchored_at": "t"}
+    f = tmp_path / "a.ndjson"
+    f.write_text(json.dumps(rec) + "\n")
+    for as_array in (False, True):
+        _ship(f, tmp_path / "x.json", as_array=as_array)
+        assert [(a["head_seq"], a["head_hash"]) for a in SlsExport(tmp_path / "x.json").read()] == [(7, "ab" * 32)]
+    (tmp_path / "c.json").write_text(json.dumps({"content": json.dumps(rec)}) + "\n")  # only the raw line kept
+    assert SlsExport(tmp_path / "c.json").read()[0]["head_seq"] == 7
+    (tmp_path / "e.json").write_text(json.dumps({"head_seq": "", "head_hash": "null"}) + "\n")  # empty ledger
+    assert SlsExport(tmp_path / "e.json").read()[0]["head_seq"] is None
+    assert isinstance(open_sink(f"sls-export:{f}"), SlsExport)
+
+
+@pytest.mark.parametrize("text,msg", [
+    (None, "not found"),
+    ("not json", "not JSON"),
+    ('{"content": "x"}\n', "content is not an anchor record"),
+    ('{"head_hash": "ab"}\n', "not an anchor record"),
+    ('{"head_seq": "seven", "head_hash": "ab"}\n', "not an integer"),
+    ('[1]', "not an anchor record"),
+])
+def test_n2_sls_export_rejects_unrecognised_items(tmp_path, text, msg):
+    f = tmp_path / "x.json"
+    if text is not None:
+        f.write_text(text)
+    with pytest.raises(SinkError, match=msg):
+        SlsExport(f).read()
+    with pytest.raises(SinkError, match="read-only"):
+        SlsExport(f).append({})
+
+
+def test_n2_offhost_copy_catches_root_rewrite(pool, settings, tmp_path, conn, roles, monkeypatch, capsys):
+    """Root on the host rewrites the ledger AND the local anchor file; only the shipped copy disagrees."""
+    ingest(pool, settings, tmp_path, [waf_alert(), waf_alert(ip="203.0.113.51")])
+    monkeypatch.setenv("DECA_DB_URL", roles["auditor"])
+    host = tmp_path / "ledger-anchors.ndjson"
+    export = tmp_path / "sls-export.json"
+    assert cli.main(["anchor-ledger", "--sink", f"file:{host}"]) == 0
+    _ship(host, export)
+    assert cli.main(["verify-ledger", "--anchors", f"sls-export:{export}"]) == 0
+    capsys.readouterr()
+
+    _owner_rewrite(conn)
+    host.unlink()  # root covers its tracks: a fresh, consistent anchor file
+    assert cli.main(["anchor-ledger", "--sink", f"file:{host}"]) == 0
+    assert ledger.verify(conn).ok
+    assert cli.main(["verify-ledger", "--anchors", f"file:{host}"]) == 0  # the host copy is fooled
+    capsys.readouterr()
+    assert cli.main(["verify-ledger", "--anchors", f"sls-export:{export}"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert not out["ok"] and any("ledger rewritten" in e for e in out["errors"])
+
+
+def test_n2_verify_needs_an_anchored_head(roles, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("DECA_DB_URL", roles["auditor"])
+    (tmp_path / "empty.ndjson").write_text("")
+    assert cli.main(["verify-ledger", "--anchors", f"sls-export:{tmp_path / 'empty.ndjson'}"]) == 1
+    assert any("no anchored head" in e for e in json.loads(capsys.readouterr().out)["errors"])
+    assert cli.main(["verify-ledger", "--anchors", f"sls-export:{tmp_path / 'missing.json'}"]) == 2
+
+
+DSN = "postgresql://deca_owner:n2-test-pw@db.internal:5432/deca_soar?sslmode=verify-full"
+
+
+@pytest.fixture
+def owner_run(tmp_path):
+    """deca-owner-run.sh with a stand-in `docker` that records what the owner job would have seen."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    seen = tmp_path / "seen"
+    fake = bin_dir / "docker"
+    fake.write_text(f"""#!/bin/sh
+f="$DECA_OWNER_DSN_FILE"
+{{ echo "args=$*"; echo "mode=$(stat -c %a "$f")"; echo "dirmode=$(stat -c %a "$(dirname "$f")")"
+   echo "content=$(cat "$f")"; echo "file=$f"; }} > {seen}
+exit "${{FAKE_DOCKER_RC:-0}}"
+""")
+    fake.chmod(0o755)
+    shm = tmp_path / "shm"
+    shm.mkdir()
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    base = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "DECA_OWNER_TMPDIR": str(shm),
+            "DECA_SECRETS_DIR": str(secrets), "DECA_ENV_FILE": str(tmp_path / "deca.env")}
+
+    def run(*args, stdin=DSN + "\n", **env):
+        r = subprocess.run(["sh", str(OWNER_RUN), *args], input=stdin, capture_output=True, text=True,
+                           env={**base, **env}, timeout=30)
+        got = dict(x.split("=", 1) for x in seen.read_text().splitlines()) if seen.exists() else None
+        return r, got
+    run.shm, run.secrets, run.seen = shm, secrets, seen
+    return run
+
+
+def test_n2_owner_dsn_exists_only_during_the_job(owner_run):
+    assert os.access(OWNER_RUN, os.X_OK)
+    r, got = owner_run("migrate")
+    assert r.returncode == 0, r.stderr
+    assert got["content"] == DSN and got["mode"] == "400" and got["dirmode"] == "700"
+    assert "docker-compose.owner.yml" in got["args"] and got["args"].endswith("run --rm owner-job deca-soar migrate")
+    assert Path(got["file"]).parent.parent == owner_run.shm
+    assert list(owner_run.shm.iterdir()) == []  # removed after the run
+    assert "n2-test-pw" not in r.stdout + r.stderr
+
+
+def test_n2_owner_dsn_removed_when_the_job_fails(owner_run):
+    r, got = owner_run("create-principal", "--name", "x", FAKE_DOCKER_RC="3")
+    assert r.returncode == 3 and got["content"] == DSN
+    assert list(owner_run.shm.iterdir()) == []
+
+
+@pytest.mark.parametrize("args,stdin,msg", [
+    (["worker"], DSN, "usage"),
+    (["migrate"], DSN.replace("verify-full", "require"), "verify-full"),
+    (["migrate"], "", "verify-full"),
+])
+def test_n2_owner_run_refuses(owner_run, args, stdin, msg):
+    r, got = owner_run(*args, stdin=stdin)
+    assert r.returncode != 0 and msg in r.stderr and got is None
+    assert list(owner_run.shm.iterdir()) == []
+    assert "n2-test-pw" not in r.stdout + r.stderr
+
+
+def test_n2_owner_run_refuses_while_owner_dsn_is_stored(owner_run):
+    stored = owner_run.secrets / "deca_db_url_owner"
+    stored.write_text(DSN)
+    r, got = owner_run("migrate")
+    assert r.returncode == 65 and "must not be stored" in r.stderr and got is None

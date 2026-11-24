@@ -7,6 +7,9 @@
 # Secrets are files under /etc/deca-soar/secrets (0600 root, 0440 for uid 10001), mounted read-only.
 # Each process gets only the secrets it needs (review F3/F5): one DB login per role, the gateway has the
 # vault public key only, only the broker has the vault private key, the worker has no DB access at all.
+# The owner DSN is not here and not on the host (review N2): migrations and create-principal run through
+# deploy/deca/bin/deca-owner-run.sh + docker-compose.owner.yml, before `up` (RUNBOOK section 5).
+# Each service also refuses to start if its DB login has more privilege than it needs (review N4).
 x-common: &common
   image: ${DECA_SOAR_IMAGE:?e.g. deca-soar:<git-sha>}
   restart: unless-stopped
@@ -32,16 +35,6 @@ x-temporal-env: &temporal-env
   DECA_TEMPORAL_PAYLOAD_KEY_ID: ${DECA_TEMPORAL_PAYLOAD_KEY_ID:-k1}
 
 services:
-  deca-migrate:
-    <<: *common
-    restart: "no"
-    command: ["deca-soar", "migrate"]
-    environment:
-      <<: *env
-      # Owner role: creates schemas, the append-only trigger and the grants. No app process uses it.
-      DECA_DB_URL_FILE: /run/secrets/deca_db_url_owner
-    secrets: [deca_db_url_owner]
-
   broker:
     <<: *common
     command: ["uvicorn", "deca_soar.broker.app:app", "--host", "0.0.0.0", "--port", "8100", "--no-server-header",
@@ -58,8 +51,6 @@ services:
     volumes:
       - ${DECA_POLICY_HOST_DIR:?reviewed policy dir}:/etc/deca-soar/policy:ro
     secrets: [deca_db_url_broker, deca_vault_private_key, broker_tls_cert, broker_tls_key]
-    depends_on:
-      deca-migrate: {condition: service_completed_successfully}
     ports:
       - "${DECA_BIND_IP:?private VPC IP of this ECS}:8100:8100"
     healthcheck:
@@ -86,8 +77,6 @@ services:
               temporal_server_ca, temporal_gateway_cert, temporal_gateway_key]
     volumes:
       - ${DECA_REPLAY_DIR:?directory with alerts.ndjson}:/data/replay:ro
-    depends_on:
-      deca-migrate: {condition: service_completed_successfully}
 
   worker:
     <<: *common
@@ -102,7 +91,8 @@ services:
     secrets: [deca_temporal_payload_key, temporal_server_ca, temporal_worker_cert, temporal_worker_key,
               deca_broker_worker_token, broker_tls_ca]
 
-  # One-shot job, started daily by deploy/deca/systemd/deca-ledger-anchor.timer. Read-only DB role.
+  # One-shot job, started hourly by deploy/deca/systemd/deca-ledger-anchor.timer. Read-only DB role.
+  # Logtail ships every new line of the anchor file to SLS off this host (deploy/deca/sls, review N2).
   ledger-anchor:
     <<: *common
     restart: "no"
@@ -119,7 +109,6 @@ networks:
   deca: {}
 
 secrets:
-  deca_db_url_owner: {file: /etc/deca-soar/secrets/deca_db_url_owner}
   deca_db_url_gateway: {file: /etc/deca-soar/secrets/deca_db_url_gateway}
   deca_db_url_broker: {file: /etc/deca-soar/secrets/deca_db_url_broker}
   deca_db_url_auditor: {file: /etc/deca-soar/secrets/deca_db_url_auditor}

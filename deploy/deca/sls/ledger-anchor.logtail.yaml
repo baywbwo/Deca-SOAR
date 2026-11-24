@@ -1,0 +1,28 @@
+# Logtail (LoongCollector / iLogtail 2.x pipeline) collection config for the ledger anchor file (review N2).
+# Status: NOT yet applied or tested against SLS. Phase 0 proves the mechanism with a mock shipper in the
+# e2e run (e2e/run_e2e.py, "off-host anchor"); this file is the reviewed spec to create in the SLS
+# console / API for the ECS machine group. Every value in <angle brackets> is filled in there, not here.
+#
+# Why: the anchor file sits on the same host as the services; root there could rewrite the ledger
+# and the file together. Each line is shipped within seconds to a logstore this host cannot delete
+# from, so `verify-ledger --anchors sls-export:<export>` still catches the rewrite (RUNBOOK 5b).
+enable: true
+inputs:
+  - Type: input_file
+    FilePaths:
+      - /var/lib/deca-soar/anchors/ledger-anchors.ndjson
+    MaxDirSearchDepth: 0
+    FileEncoding: utf8
+processors:
+  # Fields become searchable; `content` keeps the original line byte-for-byte for verification.
+  - Type: processor_parse_json_native
+    SourceKey: content
+    KeepingSourceWhenParseSucceed: true
+    KeepingSourceWhenParseFail: true
+flushers:
+  - Type: flusher_sls
+    Region: <region, same as the ECS>
+    Endpoint: <region>-intranet.log.aliyuncs.com
+    Project: <deca-soar-audit, a project only the security team administers>
+    Logstore: ledger-anchor
+    TelemetryType: logs

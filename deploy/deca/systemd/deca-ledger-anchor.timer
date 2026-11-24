@@ -1,10 +1,10 @@
 [Unit]
-Description=DECA SOAR: daily ledger anchor
+Description=DECA SOAR: hourly ledger anchor (shipped off-host by Logtail)
 
 [Timer]
-OnCalendar=*-*-* 00:15:00 Asia/Jakarta
+OnCalendar=*-*-* *:15:00
 Persistent=true
-RandomizedDelaySec=300
+RandomizedDelaySec=120
 
 [Install]
 WantedBy=timers.target
