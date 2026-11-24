@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/console.css"><script src="/static/console.js" defer></script>
+<title>Scenario tests · HyperSoar</title></head>
+<body class="app" data-screen="scenarios">
+<main class="wrap">
+  <p class="banner" id="error" role="alert" hidden></p>
+  <section class="prd-only pnl prod-empty"><p class="eyebrow">Production</p><h1 class="h1">Scenario tests run in sandbox only</h1><p class="lede">Production holds real data. Tests and the seeding bot are turned off here, and the seeder refuses to start. Switch to the sandbox install to run them.</p></section>
+
+  <section class="stats sbx-only" aria-label="Latest run">
+    <div class="stat"><span class="k">Latest run</span><span class="v num" id="r-at">–</span><span class="t" id="r-dur">hypersoar scenario run</span></div>
+    <div class="stat"><span class="k">Passed</span><span class="v num okc" id="r-pass">–</span><span class="t" id="r-of">–</span></div>
+    <div class="stat alert"><span class="k">Failed</span><span class="v num" id="r-fail">–</span><span class="t" id="r-failt">–</span></div>
+    <div class="stat"><span class="k">Runs recorded</span><span class="v num" id="r-hist">–</span><span class="t">Kept in qa.scenario_run</span></div>
+    <div class="stat"><span class="k">Build tested</span><span class="v mono" id="r-sha">–</span><span class="t">git SHA of the run</span></div>
+  </section>
+
+  <div class="grid sbx-only">
+    <section class="pnl" aria-labelledby="sc-h">
+      <div class="pnl-h"><h2 id="sc-h">Scenarios</h2><span class="sub">Each one feeds events in and checks every expected outcome</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>ID</th><th>Scenario</th><th>Checks</th><th>Time</th><th>Result</th></tr></thead>
+        <tbody id="sc"></tbody></table></div>
+    </section>
+    <aside class="side">
+      <section class="pnl"><div class="pnl-h"><h2>Seeding bot</h2><span class="r tag" id="bot-st">–</span></div>
+        <div class="bot"><div><span class="v num" id="bot-n">–</span><p class="k">alerts per minute, last 10 min</p></div>
+          <svg class="spark" id="spark" viewBox="0 0 200 40" preserveAspectRatio="none" role="img" aria-label="Seeded alerts per minute over the last hour"><path d="M0 40H200"/></svg></div>
+        <ul class="check" id="mix"></ul>
+        <p class="pnl-b k">Repeats attackers and keys on purpose so cases and attack paths form. Every row is marked synthetic.</p>
+      </section>
+      <section class="pnl gate-list"><div class="pnl-h"><h2>Before production</h2><span class="sub">preflight</span></div>
+        <ul class="check" id="gates"></ul></section>
+    </aside>
+  </div>
+</main>
+</body></html>

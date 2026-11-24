@@ -15,6 +15,9 @@ import hmac
 import html
 import logging
 import os
+import re
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -25,10 +28,12 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from starlette.concurrency import run_in_threadpool
 
+from hypersoar.broker import catalog as catalog_mod
+from hypersoar.common import entity as entity_mod
 from hypersoar.common.config import ConfigError, _cidrs, read_secret
 from hypersoar.common.dbguard import assert_least_privilege_login
 from hypersoar.common.http import BodyLimit
-from hypersoar.console import queries
+from hypersoar.console import queries, views
 from hypersoar.console.auth import LoginLimiter, PasswordHash, SessionStore, client_address
 
 log = logging.getLogger("hypersoar.console")
@@ -36,6 +41,13 @@ log = logging.getLogger("hypersoar.console")
 STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "__Host-hypersoar_console"
 MAX_BODY = 4096
+# Screens of the v3 console. Each is a static page with no inline code, filled by console.js from /api/*.
+PAGES = {"/": "overview.html", "/map": "map.html", "/cases": "cases.html", "/approvals": "approvals.html",
+         "/automation": "automation.html", "/scenarios": "scenarios.html"}
+STATIC_FILES = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8",
+                "intercept.svg": "image/svg+xml", "worldmap.svg": "image/svg+xml",
+                "geist-sans.woff2": "font/woff2", "geist-mono.woff2": "font/woff2"}
+CASE_ID = re.compile(r"^CS-[0-9]{1,9}$")
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self';"
        " connect-src 'self';"
@@ -75,6 +87,9 @@ async def lifespan(app: FastAPI):
     app.state.sessions = SessionStore()
     app.state.limiter = LoginLimiter()
     app.state.ledger = queries.LedgerStatus()
+    app.state.install = InstallInfo()
+    app.state.entity = _entity_public()
+    app.state.catalog = _catalog_public()
     db_url = read_secret("HYPERSOAR_DB_URL")
     pool = ConnectionPool(db_url, min_size=1, max_size=4, configure=_configure,
                           kwargs={"row_factory": dict_row, "autocommit": False}, open=True)
@@ -87,6 +102,41 @@ async def lifespan(app: FastAPI):
     app.state.pool = pool
     yield
     pool.close()
+
+
+class InstallInfo:
+    """Mode and entity of this install (public.hypersoar_install), re-read at most once a minute."""
+
+    def __init__(self, ttl_s: float = 60) -> None:
+        self.ttl_s, self._at, self._value, self._lock = ttl_s, -1e9, None, threading.Lock()
+
+    def get(self, pool) -> dict:
+        with self._lock:
+            if self._value is None or time.monotonic() - self._at >= self.ttl_s:
+                with pool.connection() as conn:
+                    self._value = views.install(conn)
+                self._at = time.monotonic()
+            return self._value
+
+
+def _entity_public() -> dict | None:
+    """Display fields of the entity file. No targets, accounts or integration settings leave here."""
+    try:
+        e = entity_mod.load()
+    except ConfigError as exc:
+        log.warning("console: entity file not loaded (%s); header shows the entity id only", exc)
+        return None
+    return {"id": e.id, "name": e.name, "short": e.short, "timezone": e.timezone, "region_label": e.region_label,
+            "map_xy": list(e.map_xy), "assets": len(e.assets)}
+
+
+def _catalog_public() -> list[dict] | None:
+    try:
+        cat, _ = catalog_mod.load(Path(os.environ.get("HYPERSOAR_POLICY_DIR", "policy")))
+    except (OSError, ConfigError, ValueError) as exc:
+        log.warning("console: action catalog not loaded (%s)", exc)
+        return None
+    return [a.public() for a in cat.values()]
 
 
 fastapi_app = FastAPI(title="HyperSoar Console", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -128,16 +178,24 @@ LOGIN_MESSAGES = {
 
 def _login_page(request: Request, status: int = 200, msg: str | None = None) -> HTMLResponse:
     text = html.escape(LOGIN_MESSAGES[msg])
-    synthetic = '<span class="flag">Synthetic data</span>' if request.app.state.synthetic else ""
+    st = request.app.state
+    try:
+        mode = st.install.get(st.pool)["mode"]
+    except Exception:  # the sign-in page must render even when the database is away
+        mode = "sandbox"
+    name = html.escape((st.entity or {}).get("name") or "")
+    eyebrow = "Security orchestration console" + (f" · {name}" if name else "")
+    flags = ('<span class="flag">Synthetic data</span>' if st.synthetic else "") + (
+        '<span class="env prd">Production</span>' if mode == "production" else '<span class="env sbx">Sandbox</span>')
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in · HyperSoar Console</title><link rel="stylesheet" href="/static/console.css"></head>
 <body class="gate">
 <div class="art" aria-hidden="true"></div>
 <main class="gate-panel">
-<div class="gate-top"><span class="word">HyperSoar</span>{synthetic}</div>
+<div class="gate-top"><span class="word">HyperSoar</span>{flags}</div>
 <div class="gate-copy">
-<p class="eyebrow">Security orchestration console</p>
+<p class="eyebrow">{eyebrow}</p>
 <h1 class="display">Watch every<br>decision<span class="cut">.</span></h1>
 <p class="lede">Read-only view of the gateway, triage and action broker. Nothing here can change state.</p>
 </div>
@@ -205,20 +263,106 @@ def logout(request: Request):
     return r
 
 
-@fastapi_app.get("/")
-def index(request: Request):
+def _page(request: Request, name: str):
     if not _session(request):
         return RedirectResponse("/login", status_code=303)
-    return FileResponse(STATIC / "index.html", media_type="text/html; charset=utf-8")
+    page = (STATIC / name).read_text()
+    # Production hides sandbox-only parts server side, so they never flash before console.js runs.
+    if request.app.state.install.get(request.app.state.pool)["mode"] == "production":
+        page = page.replace('<body class="app"', '<body class="app prod"', 1)
+    return HTMLResponse(page)
+
+
+def _page_route(name: str):
+    def route(request: Request):
+        return _page(request, name)
+    return route
+
+
+for _path, _name in PAGES.items():
+    fastapi_app.add_api_route(_path, _page_route(_name), methods=["GET"], include_in_schema=False)
 
 
 @fastapi_app.get("/static/{name}")
 def static(name: str):
-    files = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8",
-             "intercept.svg": "image/svg+xml", "geist-sans.woff2": "font/woff2", "geist-mono.woff2": "font/woff2"}
-    if name not in files:
+    if name not in STATIC_FILES:
         return Response(status_code=404)
-    return FileResponse(STATIC / name, media_type=files[name])
+    return FileResponse(STATIC / name, media_type=STATIC_FILES[name])
+
+
+def _api(request: Request, fn):
+    """Session check, one read-only connection, the install row: every /api/* GET goes through here."""
+    s = _session(request)
+    if not s:
+        return JSONResponse({"detail": "login required"}, status_code=401)
+    st = request.app.state
+    inst = st.install.get(st.pool)
+    with st.pool.connection() as conn:
+        return fn(conn, inst, s)
+
+
+@fastapi_app.get("/api/shell")
+def api_shell(request: Request):
+    st = request.app.state
+
+    def build(conn, inst, s):
+        return {**views.shell(conn, inst), "mode": inst["mode"], "entity_id": inst["entity_id"],
+                "entity": st.entity if st.entity and st.entity["id"] == inst["entity_id"] else None,
+                "kill_switch": queries.kill_switch(conn), "ledger": st.ledger.get(conn),
+                "meta": {"synthetic": st.synthetic, "sha": st.sha, "user": s.user, "mode": "shadow",
+                         "read_only": True},
+                "now": views.now_iso()}
+    return _api(request, build)
+
+
+@fastapi_app.get("/api/overview")
+def api_overview(request: Request):
+    return _api(request, lambda conn, inst, s: {**views.overview(conn, inst), "timeline": queries.timeline(conn),
+                                                "top_rules": queries.top_rules(conn)})
+
+
+@fastapi_app.get("/api/map")
+def api_map(request: Request, w: str = "1h"):
+    if w not in views.WINDOWS:
+        return JSONResponse({"detail": "w must be 15m, 1h or 24h"}, status_code=422)
+    return _api(request, lambda conn, inst, s: {**views.threat_map(conn, inst, w), "feed": views.feed(conn, inst)})
+
+
+@fastapi_app.get("/api/cases")
+def api_cases(request: Request, status: str = "open"):
+    if status not in ("open", "waiting", "closed"):
+        return JSONResponse({"detail": "status must be open, waiting or closed"}, status_code=422)
+    return _api(request, lambda conn, inst, s: {"status": status, "cases": views.case_list(conn, inst, status)})
+
+
+@fastapi_app.get("/api/cases/{case_id}")
+def api_case(request: Request, case_id: str):
+    if not CASE_ID.match(case_id):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+
+    def build(conn, inst, s):
+        d = views.case_detail(conn, inst, case_id)
+        return d if d is not None else JSONResponse({"detail": "not found"}, status_code=404)
+    return _api(request, build)
+
+
+@fastapi_app.get("/api/approvals")
+def api_approvals(request: Request):
+    return _api(request, lambda conn, inst, s: views.approvals(conn, inst))
+
+
+@fastapi_app.get("/api/automation")
+def api_automation(request: Request):
+    st = request.app.state
+    return _api(request, lambda conn, inst, s: {**views.automation(conn, inst, st.catalog),
+                                                "ledger": {**st.ledger.get(conn), "tail": queries.ledger_tail(conn)}})
+
+
+@fastapi_app.get("/api/scenarios")
+def api_scenarios(request: Request):
+    # Scenario tests are a sandbox tool: production shows no run, no seeding rate and no gate list.
+    return _api(request, lambda conn, inst, s: {"hidden": True} if inst["mode"] != "sandbox"
+                else views.scenarios(conn, inst))
 
 
 @fastapi_app.get("/api/state")

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/console.css"><script src="/static/console.js" defer></script>
+<title>Approvals · HyperSoar</title></head>
+<body class="app" data-screen="approvals">
+<main class="wrap">
+<p class="banner mb8" id="error" role="alert" hidden></p>
+<div class="grid">
+  <div class="stack" id="req">
+    <section class="pnl cut">
+      <div class="case-head">
+        <div class="pill-row" id="a-pills"><span class="eyebrow mono" id="a-id">–</span></div>
+        <h1 class="h1" id="a-title">Nothing is waiting for approval</h1>
+        <p class="lede full" id="a-lede"></p>
+      </div>
+      <div class="score" id="a-score"></div>
+      <div class="diff" id="a-diff"></div>
+      <div class="pnl-b pill-row actions bt">
+        <button class="btn pri" type="button" disabled>Approve</button><button class="btn ghost" type="button" disabled>Reject</button><button class="btn ghost" type="button" disabled>Ask AI for more evidence</button>
+        <span class="locked">Shadow: writes not active yet (waiting for N1)</span>
+      </div>
+    </section>
+
+    <section class="pnl"><div class="pnl-h"><h2>Escalation</h2><span class="sub">Each step gets a Lark message with a link to this page</span></div>
+      <ol class="chain" id="chain"></ol></section>
+
+    <section class="pnl"><div class="pnl-h"><h2>Evidence</h2></div>
+      <div class="pnl-b"><ul class="ev" id="a-ev"></ul></div></section>
+  </div>
+  <aside class="side">
+    <section class="pnl"><div class="pnl-h"><h2>Queue</h2><span class="sub" id="aq-sub">–</span></div>
+      <ol class="queue" id="aq"></ol></section>
+    <section class="pnl"><div class="pnl-h"><h2>Recent decisions</h2></div>
+      <ol class="ledger" id="recent"></ol></section>
+  </aside>
+</div>
+</main>
+</body></html>

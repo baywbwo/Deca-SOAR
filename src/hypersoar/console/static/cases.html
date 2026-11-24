@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/console.css"><script src="/static/console.js" defer></script>
+<title>Cases · HyperSoar</title></head>
+<body class="app" data-screen="cases">
+<main class="wrap wide">
+<p class="banner mb8" id="error" role="alert" hidden></p>
+<div class="cols c-1-2">
+  <aside class="pnl" aria-labelledby="q-h">
+    <div class="pnl-h"><h2 id="q-h">Cases</h2><span class="sub" id="q-sub">–</span></div>
+    <div class="pnl-b bb"><span class="seg" id="q-seg" role="group" aria-label="Case status"><button type="button" data-s="open" aria-pressed="true">Open</button><button type="button" data-s="waiting" aria-pressed="false">Waiting</button><button type="button" data-s="closed" aria-pressed="false">Closed</button></span></div>
+    <ol class="queue" id="queue"></ol>
+  </aside>
+
+  <div class="stack" id="case">
+    <section class="pnl cut">
+      <div class="case-head">
+        <div class="pill-row" id="c-pills"><span class="eyebrow mono" id="c-id">–</span></div>
+        <h1 class="h1" id="c-title">Select a case</h1>
+        <div class="pill-row" id="c-keys"></div>
+      </div>
+      <div class="score" id="c-score"></div>
+    </section>
+
+    <section class="pnl lm-wrap" id="ap" aria-labelledby="ap-h">
+      <div class="pnl-h"><h2 id="ap-h">Attack path</h2><span class="sub">How the attacker moved, replayed from the alerts in this case</span><span class="r flag sbx-only">Synthetic data</span></div>
+      <div class="lm" id="lm"></div>
+      <div class="lm-bar"><button class="btn ghost" type="button" data-replay>Replay</button><span class="prog"><i></i></span><span class="k num" id="ap-span">–</span></div>
+      <ol class="steps bt" id="steps"></ol>
+    </section>
+
+    <div class="cols c-1-1">
+      <section class="pnl" aria-labelledby="g1-h">
+        <div class="pnl-h"><h2 id="g1-h">Why these alerts are one case</h2><span class="sub" id="g1-sub"></span></div>
+        <p class="why" id="why"></p>
+        <ol class="grp" id="grp"></ol>
+      </section>
+      <section class="pnl" aria-labelledby="v-h">
+        <div class="pnl-h"><h2 id="v-h">AI verdict</h2><span class="sub"><span id="v-model">9router AI DECA</span><span class="sbx-only"> (mock)</span></span></div>
+        <div class="verdict"><span class="v" id="v-v">–</span><div class="pill-row"><span class="k">Confidence</span><span class="num" id="v-c">–</span><span class="k">· threshold to act 0.80</span></div><div class="conf"><i id="v-bar"></i></div></div>
+        <div class="pnl-b"><p class="k mb8">Evidence the verdict cites</p>
+          <ul class="ev" id="v-ev"></ul>
+          <p class="k mt12" id="v-why"></p>
+          <p class="k mt12">The AI only sees tokenised data. Raw IPs and keys are swapped back in by the gateway.</p>
+        </div>
+      </section>
+    </div>
+
+    <div class="cols c-1-1">
+      <section class="pnl" aria-labelledby="t-h">
+        <div class="pnl-h"><h2 id="t-h">AI work trace</h2><span class="sub">Every call is an audit trail entry</span></div>
+        <ol class="trace" id="trace"></ol>
+      </section>
+      <div class="stack">
+        <section class="pnl" aria-labelledby="pc-h">
+          <div class="pnl-h"><h2 id="pc-h">Response</h2><span class="sub">Broker decisions, shadow mode</span></div>
+          <div class="table-wrap"><table class="tight">
+            <thead><tr><th>Action</th><th>Level</th><th>Decision</th></tr></thead>
+            <tbody id="resp"></tbody></table></div>
+        </section>
+        <section class="pnl"><div class="pnl-h"><h2>Policy check</h2><span class="sub mono" id="pol-sub"></span></div>
+          <ul class="check" id="pol"></ul></section>
+      </div>
+    </div>
+  </div>
+</div>
+</main>
+</body></html>

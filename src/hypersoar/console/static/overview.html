@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/console.css"><script src="/static/console.js" defer></script>
+<title>Overview · HyperSoar</title></head>
+<body class="app" data-screen="overview">
+<main class="wrap">
+  <p class="banner" id="error" role="alert" hidden></p>
+  <section class="stats" aria-label="Last 24 hours">
+    <div class="stat"><span class="k">Alerts, 24 h</span><span class="v num" id="s-alerts">–</span><span class="t" id="s-alerts-t">–</span></div>
+    <div class="stat alert"><span class="k">Open cases</span><span class="v num" id="s-cases">–</span><span class="t" id="s-cases-t">–</span></div>
+    <div class="stat"><span class="k">Broker decisions</span><span class="v num" id="s-decisions">–</span><span class="t">All in shadow mode</span></div>
+    <div class="stat"><span class="k">Waiting for approval</span><span class="v num" id="s-pending">–</span><span class="t" id="s-pending-t">–</span></div>
+    <div class="stat"><span class="k">Median time to verdict</span><span class="v num" id="s-median">–</span><span class="t" id="s-median-t">AI triage</span></div>
+  </section>
+
+  <div class="cols c-2-1">
+    <section class="mapcard tall" data-live data-feed="#ov-feed" aria-labelledby="map-h">
+      <div class="map-hud">
+        <div><h1 id="map-h">Where attacks come from</h1><p class="sub" id="map-sub">Every arc is one alert from the last hour</p></div>
+        <span class="live"><i></i>Live</span>
+      </div>
+      <div class="map-foot">
+        <ul class="legend"><li><span class="sw hi"></span>High and critical</li><li><span class="sw md"></span>Medium</li><li><span class="sw lo"></span>Low</li></ul>
+        <a class="btn ghost" href="/map">Open threat map</a>
+      </div>
+      <div class="drawer" aria-live="polite"><div class="pnl-h"><div><h2>Origin</h2><p class="sub"></p></div><button class="btn ghost" type="button">Close</button></div><ul></ul></div>
+    </section>
+    <section class="pnl" aria-labelledby="lf-h">
+      <div class="pnl-h"><h2 id="lf-h">Live detections</h2><span class="r live"><i></i>polling</span></div>
+      <ol class="ticker" id="ov-feed" aria-live="off"></ol>
+    </section>
+  </div>
+
+  <section class="hero" aria-labelledby="signal-h">
+    <div class="signal">
+      <div class="signal-head">
+        <div><h2 id="signal-h">Threat signal</h2><p class="sub">Alerts ingested per hour, last 24 hours</p></div>
+        <div class="big"><span class="v num" id="r-alerts">–</span><span class="k">alerts in the last hour</span></div>
+      </div>
+      <svg class="chart" id="chart" viewBox="0 0 960 220" preserveAspectRatio="none" role="img" aria-labelledby="chart-t"><title id="chart-t">Hourly alert volume for the last 24 hours</title></svg>
+      <div class="axis num" id="axis" aria-hidden="true"></div>
+      <ul class="legend"><li><span class="sw hi"></span>High and critical</li><li><span class="sw md"></span>Medium</li><li><span class="sw lo"></span>Low and info</li></ul>
+    </div>
+    <div class="pipe">
+      <h2>Pipeline</h2><p class="sub">Last 24 hours, bar length on a log scale</p>
+      <ol class="flow" id="flow"></ol>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="pnl" aria-labelledby="cs-h">
+      <div class="pnl-h"><h2 id="cs-h">Open cases</h2><span class="sub">Alerts with the same entity in 30 min become one case</span><a class="r btn ghost" href="/cases">All cases</a></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Priority</th><th>Case</th><th>Alerts</th><th>AI verdict</th><th>Broker</th><th>Jira</th></tr></thead>
+        <tbody id="ov-cases"></tbody></table></div>
+    </section>
+    <aside class="side">
+      <section class="pnl"><div class="pnl-h"><h2>Top rules</h2><span class="sub">Last 24 hours</span></div><ol class="rules" id="rules"></ol></section>
+      <section class="pnl"><div class="pnl-h"><h2>Integrations</h2><a class="r btn ghost" href="/automation">Details</a></div><ul class="integ" id="integ"></ul></section>
+    </aside>
+  </div>
+</main>
+</body></html>

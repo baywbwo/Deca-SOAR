@@ -1,255 +1,938 @@
-"use strict";
-// Read-only console: polls /api/state and renders with textContent only (alert fields are untrusted).
-(function () {
-  var POLL_MS = 5000;
-  var SVG = "http://www.w3.org/2000/svg";
-  var $ = function (id) { return document.getElementById(id); };
-  var tz = { timeZone: "Asia/Jakarta", hour12: false };
+// HyperSoar console v3. Fills the static pages from the read-only /api/* endpoints.
+// CSP is script-src 'self' and style-src 'self': nodes are built with createElement and textContent only,
+// no HTML string parsing, and per-element values go through CSSOM (el.style.x / setProperty), never style="".
+(() => {
+  "use strict";
+  const body = document.body;
+  const screen = body.dataset.screen;
+  if (!screen) return;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const NS = "http://www.w3.org/2000/svg";
+  const fmt = new Intl.NumberFormat("en-US");
+  const $ = (s, r = document) => r.querySelector(s);
+  const byId = id => document.getElementById(id);
+  const POLL_MS = 10000;
 
-  function el(tag, cls, text) {
-    var e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text !== undefined && text !== null) e.textContent = String(text);
+  // -- DOM helpers ----------------------------------------------------------------------------------------
+  function setAttrs(e, a) {
+    for (const k in a || {}) {
+      const v = a[k];
+      if (v === null || v === undefined || v === false) continue;
+      if (k === "text") e.textContent = v;
+      else e.setAttribute(k, v === true ? "" : String(v));
+    }
     return e;
   }
-  function svg(tag, attrs) {
-    var e = document.createElementNS(SVG, tag);
-    Object.keys(attrs).forEach(function (k) { e.setAttribute(k, String(attrs[k])); });
+  function el(tag, attrs, ...kids) {
+    const e = setAttrs(document.createElement(tag), attrs);
+    for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k instanceof Node ? k : String(k));
     return e;
   }
-  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
-  function time(iso) { return iso ? new Date(iso).toLocaleTimeString("en-GB", tz) : "–"; }
-  function hour(iso) { return new Date(iso).toLocaleTimeString("en-GB", { timeZone: "Asia/Jakarta", hour: "2-digit", minute: "2-digit", hour12: false }); }
-  function n(v) { return v === undefined || v === null ? 0 : v; }
-  function fmt(v) { return n(v).toLocaleString("en-US"); }
-  function short(h) { return h ? h.slice(0, 12) + "…" : "–"; }
-  function pct(v, max) { return max > 0 ? Math.max(v > 0 ? 2 : 0, Math.round(v / max * 100)) + "%" : "0%"; }
+  function sv(tag, attrs, parent) {
+    const e = setAttrs(document.createElementNS(NS, tag), attrs);
+    if (parent) parent.append(e);
+    return e;
+  }
+  function fill(target, ...kids) {
+    const e = typeof target === "string" ? byId(target) : target;
+    if (e) e.replaceChildren(...kids.flat().filter(k => k !== null && k !== undefined && k !== false));
+    return e;
+  }
+  function txt(id, t) { const e = byId(id); if (e) e.textContent = t; return e; }
+  const width = (e, frac) => { e.style.width = `${Math.max(0, Math.min(1, frac || 0)) * 100}%`; return e; };
+  const clip = (s, n) => (s && s.length > n ? `${s.slice(0, n - 1)}…` : s || "");
 
-  var VERDICT = { malicious: ["hot", "Malicious"], suspicious: ["wait", "Suspicious"], benign: ["ok", "Benign"] };
-  var BROKER = {
-    validated: ["ok", "Passed policy, not executed"],
-    rejected: ["hot", "Blocked by policy"],
-    pending_approval: ["wait", "Needs approval"],
-    expired: ["", "Expired"]
-  };
-  var GATEWAY = { forwarded: ["act", "Forwarded"], pending: ["wait", "Queued"], dead: ["hot", "Failed"] };
+  // -- time, numbers, words -------------------------------------------------------------------------------
+  let TZ = "Asia/Jakarta";
+  let TZL = "WIB";
+  let skew = 0;  // server clock minus browser clock, so countdowns follow the server
+  const TZ_LABEL = { "Asia/Jakarta": "WIB", "Asia/Pontianak": "WIB", "Asia/Makassar": "WITA", "Asia/Jayapura": "WIT" };
+  const now = () => Date.now() + skew;
+  const ms = iso => (iso ? Date.parse(iso) : NaN);
+  const tfmt = (iso, o) => (iso ? new Date(iso).toLocaleTimeString("en-GB", { timeZone: TZ, hour12: false, ...o }) : "–");
+  const hms = iso => tfmt(iso);
+  const hm = iso => tfmt(iso, { hour: "2-digit", minute: "2-digit" });
+  const dayOf = iso => new Date(iso).toLocaleDateString("en-GB", { timeZone: TZ, day: "numeric", month: "short" });
+  const when = iso => (!iso ? "–" : dayOf(iso) === dayOf(new Date(now()).toISOString()) ? hm(iso) : `${dayOf(iso)} ${hm(iso)}`);
+  function span(sec) {
+    sec = Math.max(0, Math.round(sec));
+    if (sec < 60) return `${sec} s`;
+    if (sec < 3600) return `${Math.round(sec / 60)} min`;
+    if (sec < 86400) return `${Math.round(sec / 3600)} h`;
+    return `${Math.round(sec / 86400)} d`;
+  }
+  const ago = iso => (iso ? span((now() - ms(iso)) / 1000) : "–");
+  const dur = m => (m === null || m === undefined ? "–" : m < 1000 ? `${m} ms` : `${(m / 1000).toFixed(1)} s`);
+  function secs(s) {
+    if (s === null || s === undefined) return "–";
+    return s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} m ${Math.round(s % 60)} s`;
+  }
+  const n = v => (v === null || v === undefined ? "–" : fmt.format(v));
+  const plural = (k, w) => `${n(k)} ${w}${k === 1 ? "" : "s"}`;
+  const cap = s => (s ? s[0].toUpperCase() + s.slice(1) : "");
+  const BUCKET = { critical: "hi", high: "hi", medium: "md", low: "lo", info: "lo" };
+  const bucket = s => BUCKET[s] || "lo";
+  const sevTag = (p, sev) => el("span", { class: `sev ${sev || "low"}`, text: p ? `${p} ${sev}` : sev || "–" });
+  const KIND = { ip: "Source IP", user: "Principal", ak: "AccessKey", asset: "Asset" };
+  const VERDICT_TAG = { malicious: "hot", suspicious: "wait", benign: "ok" };
 
-  function row(a) {
-    var tr = el("tr");
-    var t = el("td");
-    t.appendChild(el("div", "tm", time(a.ingested_at)));
-    t.appendChild(el("div", "small", "detected " + time(a.detected_at)));
-    tr.appendChild(t);
-
-    var al = el("td");
-    al.appendChild(el("div", "ttl", a.rule_id));
-    var m = el("div", "row");
-    m.appendChild(el("span", "sev " + (a.severity || ""), a.severity));
-    m.appendChild(el("span", "tag", a.source));
-    m.appendChild(el("span", "small", a.event_count + (a.event_count === 1 ? " event" : " events")));
-    al.appendChild(m);
-    if (a.src_token) {
-      var src = el("div", "mono");
-      src.appendChild(el("span", "src", "src"));
-      src.appendChild(document.createTextNode(a.src_token));
-      al.appendChild(src);
-    }
-    if (a.uri) al.appendChild(el("div", "mono", a.uri));
-    tr.appendChild(al);
-
-    var g = GATEWAY[a.gateway_status] || ["", a.gateway_status];
-    var gw = el("td");
-    gw.appendChild(el("span", "tag " + g[0], g[1]));
-    if (a.forwarded_at) gw.appendChild(el("div", "small", "to Temporal " + time(a.forwarded_at)));
-    tr.appendChild(gw);
-
-    var tri = el("td");
-    if (a.triage) {
-      var v = VERDICT[a.triage.verdict] || ["", a.triage.verdict];
-      tri.appendChild(el("span", "tag " + v[0], v[1]));
-      var c = typeof a.triage.confidence === "number" ? a.triage.confidence.toFixed(2) : "–";
-      tri.appendChild(el("div", "small", "confidence " + c + ", " + (a.triage.model || "unknown model")));
-    } else {
-      tri.appendChild(el("span", "small", a.source === "waf" ? "Waiting for worker" : "Not sent to broker (non-WAF)"));
-    }
-    tr.appendChild(tri);
-
-    var br = el("td");
-    if (a.broker) {
-      var b = BROKER[a.broker.status] || ["", a.broker.status];
-      var bm = el("div", "row");
-      bm.appendChild(el("span", "tag " + b[0], b[1]));
-      bm.appendChild(el("span", "tag", a.broker.level + ", " + a.broker.mode));
-      br.appendChild(bm);
-      br.appendChild(el("div", "mono", a.broker.action));
-      if (a.broker.would_execute) br.appendChild(el("div", "mono", "would run " + a.broker.would_execute));
-      if (a.broker.reasons && a.broker.reasons.length) br.appendChild(el("div", "reasons", a.broker.reasons.join("; ")));
-    } else {
-      br.appendChild(el("span", "small", "–"));
-    }
-    tr.appendChild(br);
-    return tr;
+  // -- API ------------------------------------------------------------------------------------------------
+  class LoginRequired extends Error {}
+  async function api(path) {
+    const r = await fetch(path, { credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } });
+    if (r.status === 401) { location.assign("/login"); throw new LoginRequired("login required"); }
+    if (!r.ok) throw new Error(`${path} answered ${r.status}`);
+    return r.json();
+  }
+  function showError(msg) {
+    const b = byId("error");
+    if (!b) return;
+    b.hidden = !msg;
+    b.textContent = msg || "";
+  }
+  function poll(fn, every = POLL_MS) {
+    const run = async () => {
+      if (!document.hidden) {
+        try { await fn(); showError(""); } catch (e) {
+          if (!(e instanceof LoginRequired)) showError(`Could not refresh this screen (${e.message}). Retrying in ${every / 1000} s.`);
+        }
+      }
+      setTimeout(run, every);
+    };
+    return run();
   }
 
-  function chart(series) {
-    var root = $("chart"), axis = $("axis");
-    var W = 960, H = 220, top = 8, base = H - 4;
-    Array.prototype.slice.call(root.childNodes).forEach(function (c) { if (c.nodeName !== "title") root.removeChild(c); });
-    clear(axis);
-    var max = 0;
-    series.forEach(function (h) { max = Math.max(max, h.high + h.medium + h.low); });
-    var scale = max > 0 ? (base - top) / max : 0;
-    [0.25, 0.5, 0.75, 1].forEach(function (f) {
-      var y = Math.round(base - (base - top) * f) + 0.5;
-      root.appendChild(svg("line", { x1: 0, x2: W, y1: y, y2: y, "class": "grid" }));
+  // -- shell: header, mode bar, footer --------------------------------------------------------------------
+  let shellData = null;
+  const TABS = [
+    ["overview", "Overview", "/", null],
+    ["map", "Threat map", "/map", null],
+    ["cases", "Cases", "/cases", "cnt-cases"],
+    ["approvals", "Approvals", "/approvals", "cnt-approvals"],
+    ["automation", "Automation", "/automation", null],
+    ["scenarios", "Scenario tests", "/scenarios", "cnt-scn", "sbx-only"],
+  ];
+
+  function buildShell() {
+    const mark = sv("svg", { class: "mark", viewBox: "0 0 32 32", "aria-hidden": "true" });
+    sv("path", { d: "M6 6.5 10 5v9.5h12V5l4 1.5v19L22 27v-9.5H10V27l-4-1.5z", fill: "#e3000f" }, mark);
+    sv("rect", { x: 3, y: 12.5, width: 26, height: 2.4, fill: "#0b0b0c" }, mark);
+    sv("rect", { x: 7, y: 12.5, width: 21, height: 2.4, fill: "#f4f4f4" }, mark);
+    const header = el("header", { class: "top" },
+      el("a", { class: "brand", href: "/", "aria-label": "HyperSoar home" }, mark, el("span", { class: "word", text: "HyperSoar" })),
+      el("nav", { class: "tabs", "aria-label": "Screens" }, TABS.map(([id, label, href, cnt, cls]) =>
+        el("a", { href, class: cls, "aria-current": id === screen ? "page" : null }, label,
+          cnt ? el("span", { class: "cnt", id: cnt }) : null))),
+      el("div", { class: "top-r" },
+        el("span", { class: "flag sbx-only", text: "Synthetic data" }),
+        el("span", { class: "meta-item" }, el("span", { class: "dot", id: "led-dot" }), "Audit trail ", el("strong", { id: "led-txt", text: "–" })),
+        el("span", { class: "meta-item num" }, el("span", { id: "clock", text: "--:--:--" }), " ", el("span", { id: "tzl", text: TZL })),
+        el("form", { class: "who", method: "post", action: "/logout" },
+          el("span", { id: "who", text: "" }), el("button", { class: "btn ghost", type: "submit", text: "Sign out" }))));
+    const mode = el("div", { class: "mode", role: "status" },
+      el("span", { class: "slice", "aria-hidden": "true" }),
+      el("span", { class: "entity", id: "entity", text: "–" }), el("span", { class: "sep" }),
+      el("span", { class: "env sbx sbx-only", text: "Sandbox" }), el("span", { class: "env prd prd-only", text: "Production" }),
+      el("strong", { text: "Shadow mode" }),
+      el("span", { class: "sbx-only mtx", text: "Seeding bot is generating attacks. The broker decides, nothing is executed." }),
+      el("span", { class: "prd-only mtx", text: "Live data. The broker decides, nothing is executed until N1 ships." }),
+      el("span", { class: "sp" }),
+      el("span", { class: "kill", id: "kill", text: "Kill switch –" }));
+    body.prepend(header, mode);
+    body.append(el("footer", { class: "status num" },
+      el("span", { id: "f-ingest", text: "Last ingest –" }), el("span", { text: "Temporal 1.32.2, mTLS" }),
+      el("span", { id: "f-ai", text: "AI: 9router AI DECA" }), el("span", { id: "f-audit", text: "Audit trail –" }),
+      el("span", { class: "sp" }), el("span", { id: "f-build", text: "" })));
+    const tick = () => txt("clock", new Date(now()).toLocaleTimeString("en-GB", { timeZone: TZ, hour12: false }));
+    tick();
+    setInterval(tick, 1000);
+  }
+
+  function applyShell(s) {
+    shellData = s;
+    skew = ms(s.now) - Date.now() || 0;
+    if (s.entity && s.entity.timezone) {
+      TZ = s.entity.timezone;
+      TZL = TZ_LABEL[TZ] || new Intl.DateTimeFormat("en-US", { timeZone: TZ, timeZoneName: "short" })
+        .formatToParts(new Date()).find(p => p.type === "timeZoneName").value;
+      txt("tzl", TZL);
+    }
+    body.classList.toggle("prod", s.mode === "production");
+    const killed = !!(s.kill_switch && s.kill_switch.global_engaged);
+    body.classList.toggle("killed", killed);
+    txt("kill", killed ? "Kill switch ON · all automatic actions stopped" : "Kill switch off");
+    document.querySelectorAll("[data-ks-state]").forEach(e => { e.textContent = killed ? "On" : "Off"; });
+    document.querySelectorAll("[data-ks-btn]").forEach(e => { e.textContent = killed ? "Turn off kill switch" : "Turn on kill switch"; });
+    txt("entity", s.entity ? s.entity.name : s.entity_id || "No entity configured");
+    txt("who", s.meta ? s.meta.user : "");
+    const cnt = (id, v, hot) => { const e = txt(id, v); if (e) e.className = hot ? "cnt hot" : "cnt"; };
+    cnt("cnt-cases", n(s.open_cases), s.open_cases > 0);
+    cnt("cnt-approvals", n(s.pending), s.pending > 0);
+    cnt("cnt-scn", s.scenarios ? `${s.scenarios.passed}/${s.scenarios.total}` : "–", s.scenarios && s.scenarios.passed < s.scenarios.total);
+    const led = s.ledger || {};
+    const dot = byId("led-dot");
+    if (dot) dot.className = led.ok === false ? "dot bad" : "dot ok";
+    txt("led-txt", led.ok === true ? "valid" : led.ok === false ? "broken" : "checking");
+    txt("f-ingest", s.last_ingest ? `Last ingest ${ago(s.last_ingest)} ago` : "No alerts ingested yet");
+    txt("f-ai", s.ai ? `AI: 9router AI DECA · ${s.ai.model || "no model"}${s.ai.target === "mock" ? " (mock)" : ""}` : "AI: not configured");
+    txt("f-audit", led.checked_at ? `Audit trail ${n(led.entries)} entries, checked ${hm(led.checked_at)} ${TZL}` : "Audit trail not checked yet");
+    txt("f-build", s.meta && s.meta.sha ? `build ${s.meta.sha}` : "");
+  }
+  const refreshShell = async () => applyShell(await api("/api/shell"));
+
+  // -- integrations list (overview, automation) -----------------------------------------------------------
+  const INTEG = { lark: ["LK", "Lark"], jira: ["JR", "Jira"], ai: ["9R", "9router AI DECA"] };
+  const HEALTH = { healthy: ["ok", "Healthy"], error: ["hot", "Errors"], untested: ["wait", "Not tested"], off: ["", "Off"] };
+  function integItems(list, long) {
+    const items = (list || []).map(i => {
+      const [logo, name] = INTEG[i.name] || ["··", i.name];
+      const [cls, label] = HEALTH[i.health] || ["", i.health];
+      let d = i.detail;
+      if (long) {
+        const last = i.last_call ? `Last ${i.last_call.op} ${ago(i.last_call.at)} ago${i.last_call.ref ? `, ${i.last_call.ref}` : ""}.` : "No calls yet.";
+        d = `${i.detail}. ${last} ${plural(i.calls_24h, "call")}, ${plural(i.errors_24h, "error")} in 24 h${i.p95_ms !== null ? `, p95 ${dur(i.p95_ms)}` : ""}.`;
+      } else if (i.p95_ms !== null) d = `${i.detail} · p95 ${dur(i.p95_ms)}`;
+      return el("li", {}, el("span", { class: "logo", text: logo }),
+        el("span", { class: "nm", text: long ? `${name} · config v${i.version}` : name }), el("span", { class: "d", text: d }),
+        el("span", { class: "r" }, el("span", { class: `tag ${cls}`, text: label }),
+          i.target === "mock" ? el("span", { class: "code sbx-only", text: i.name === "ai" ? "mock model" : "mock endpoint" }) : null));
     });
-    root.appendChild(svg("line", { x1: 0, x2: W, y1: base + 0.5, y2: base + 0.5, "class": "grid" }));
-    var slot = W / Math.max(series.length, 1), bw = Math.max(4, Math.floor(slot * 0.62));
-    series.forEach(function (h, i) {
-      var x = Math.round(i * slot + (slot - bw) / 2), y = base;
-      [["low", "b-lo"], ["medium", "b-md"], ["high", "b-hi"]].forEach(function (k) {
-        var v = h[k[0]];
-        if (!v) return;
-        var hgt = Math.max(2, v * scale);
-        y -= hgt;
-        root.appendChild(svg("rect", { x: x, y: y.toFixed(1), width: bw, height: hgt.toFixed(1), "class": k[1] }));
+    if (!items.length) items.push(el("li", {}, el("span", { class: "d", text: "No integration configured for this install." })));
+    if (long) {
+      items.push(el("li", {}, el("span", { class: "logo", text: "AC" }), el("span", { class: "nm", text: "Alibaba Cloud · SLS, ActionTrail, WAF" }),
+        el("span", { class: "d" }, el("span", { class: "sbx-only", text: "Replaced by the seeding bot in sandbox" }),
+          el("span", { class: "prd-only", text: "Read only. WAF writes go through the broker." })),
+        el("span", { class: "r" }, el("span", { class: "tag ok sbx-only", text: "Seeding bot" }), el("span", { class: "tag prd-only", text: "Read only" }))));
+    }
+    return items;
+  }
+
+  // -- live attack map (overview and threat map) ----------------------------------------------------------
+  const WINDOW_TEXT = { "15m": "15 minutes", "1h": "hour", "24h": "24 hours" };
+  function liveMap(card) {
+    const war = card.hasAttribute("data-war");
+    const svg = sv("svg", { class: "mapsvg", viewBox: "0 0 1200 508", preserveAspectRatio: "xMidYMid meet", role: "img", "aria-label": "Map of alert origins" });
+    card.prepend(svg);
+    sv("image", { href: "/static/worldmap.svg", x: 0, y: 0, width: 1200, height: 508, class: "land" }, svg);
+    const gBase = sv("g", { class: "routes" }, svg);
+    const gArc = sv("g", {}, svg);
+    const gOrg = sv("g", {}, svg);
+    const gTgt = sv("g", { class: "tgt" }, svg);
+    const feedEl = $(card.dataset.feed || "#none");
+    const olist = $(card.dataset.origins || "#none");
+    const drawer = $(".drawer", card);
+    let target = [915.5, 317.2];
+    let targetKey = "";
+    let data = null;
+    let selected = null;
+    let opener = null;
+    let replay = [];
+    let ri = 0;
+    let fresh = [];
+    const seenArcs = new Set();
+    const seenFeed = new Set();
+
+    const arcD = xy => {
+      const [x1, y1] = xy;
+      const [x2, y2] = target;
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const d = Math.hypot(dx, dy);
+      return `M${x1} ${y1}Q${(x1 + x2) / 2 - dy * 0.12} ${(y1 + y2) / 2 - d * 0.32} ${x2} ${y2}`;
+    };
+    const orgClass = o => (o.n && o.hi / o.n >= 0.4 ? "hi" : o.n && o.hi / o.n >= 0.2 ? "md" : "lo");
+
+    function drawTarget(entity) {
+      const key = JSON.stringify(entity || {});
+      if (key === targetKey) return;
+      targetKey = key;
+      if (entity && Array.isArray(entity.map_xy)) target = entity.map_xy;
+      gTgt.replaceChildren();
+      [0, 1].forEach(i => sv("circle", { class: i ? "ring p p2" : "ring p", cx: target[0], cy: target[1], r: 10 }, gTgt));
+      sv("circle", { cx: target[0], cy: target[1], r: 4, fill: "#f4f4f4" }, gTgt);
+      sv("text", { x: target[0] + 14, y: target[1] + 22, text: entity ? entity.region_label : "Cloud region" }, gTgt);
+      sv("text", { x: target[0] + 14, y: target[1] + 36, class: "sub", text: entity ? `${entity.short || entity.id} · ${plural(entity.assets, "asset")}` : "" }, gTgt);
+    }
+
+    function openDrawer(o, g) {
+      if (!drawer) return;
+      opener = document.activeElement;
+      selected = o.city;
+      gOrg.querySelectorAll(".sel").forEach(x => x.classList.remove("sel"));
+      if (g) g.classList.add("sel");
+      $("h2", drawer).textContent = o.city || "Unknown origin";
+      $(".sub", drawer).textContent = `${[o.asn, o.as_name].filter(Boolean).join(" ")}${o.tor ? " · Tor exit" : ""} · ${plural(o.n, "alert")} in this window`;
+      fill($("ul", drawer), o.cases.length ? o.cases.map(c => el("li", {},
+        el("span", { class: "pill-row" }, el("span", { class: `sev ${c.sev}`, text: c.sev }), el("span", { class: "code", text: c.case_id })),
+        el("a", { class: "ttl", href: `/cases#${c.case_id}`, text: c.title }),
+        el("span", { class: "k", text: c.status === "open" ? "Open case" : "Closed case" })))
+        : [el("li", {}, el("span", { class: "ttl", text: "No case linked in this window" }),
+          el("span", { class: "k", text: `${plural(o.n, "alert")} from this origin.` }))]);
+      drawer.classList.add("open");
+      $("button", drawer).focus();
+    }
+    if (drawer) {
+      $("button", drawer).addEventListener("click", () => {
+        drawer.classList.remove("open");
+        selected = null;
+        gOrg.querySelectorAll(".sel").forEach(x => x.classList.remove("sel"));
+        if (opener && opener.focus) opener.focus();
       });
-      var lab = el("span", null, i % 3 === 0 ? hour(h.hour) : "");
-      axis.appendChild(lab);
-    });
-    if (series.length) {
-      var last = series.length - 1, cx = Math.round(last * slot + slot / 2);
-      root.appendChild(svg("rect", { x: cx - bw / 2 - 3, y: top, width: bw + 6, height: base - top, "class": "now" }));
     }
-    var hi = 0;
-    series.forEach(function (h) { hi += h.high; });
-    $("chart-t").textContent = "Hourly alert volume for the last 24 hours, peak " + max + " per hour, " + hi + " high or critical";
+
+    function drawOrigins() {
+      const os = data.origins;
+      const max = Math.max(1, ...os.map(o => o.n));
+      const labelled = new Set(os.slice(0, war ? 40 : 6).map(o => o.city));
+      gBase.replaceChildren();
+      gOrg.replaceChildren();
+      os.forEach(o => {
+        const r = sv("path", { d: arcD(o.xy), class: `arc base ${orgClass(o) === "hi" ? "hi" : "md"}` }, gBase);
+        r.style.strokeWidth = (0.4 + (o.n / max) * 1.4).toFixed(2);
+        const g = sv("g", { class: `org ${orgClass(o)}${o.city === selected ? " sel" : ""}`, tabindex: 0, role: "button",
+          "aria-label": `${o.city}, ${plural(o.n, "alert")}. Open related cases.` }, gOrg);
+        const k = Math.sqrt(o.n / max);
+        sv("circle", { class: "halo", cx: o.xy[0], cy: o.xy[1], r: (4 + 12 * k).toFixed(1) }, g);
+        sv("circle", { class: "pin", cx: o.xy[0], cy: o.xy[1], r: 2.2 }, g);
+        if (labelled.has(o.city)) {
+          const left = o.xy[0] > 860;
+          sv("text", { x: (o.xy[0] + (left ? -1 : 1) * (6 + 6 * k)).toFixed(1), y: o.xy[1] + 4, "text-anchor": left ? "end" : "start", text: o.city }, g);
+        }
+        g.addEventListener("click", () => openDrawer(o, g));
+        g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(o, g); } });
+      });
+      const top = os[0];
+      svg.setAttribute("aria-label", `Map of ${plural(data.total, "alert")} in the last ${WINDOW_TEXT[data.window]}` +
+        (top ? `. Largest origin: ${top.city} with ${plural(top.n, "alert")}.` : "."));
+    }
+
+    function drawSide() {
+      if (olist) {
+        const os = data.origins.slice(0, 8);
+        const max = Math.max(1, ...os.map(o => o.n));
+        fill(olist, os.length ? os.map(o => {
+          const li = el("li", { class: orgClass(o) === "hi" ? "hi" : null, tabindex: 0, role: "button" },
+            el("span", {}, `${o.city} `, el("span", { class: "code", text: o.asn })), el("span", { class: "n", text: n(o.n) }),
+            el("span", { class: "bar" }, width(el("span", { class: "fill" }), o.n / max)));
+          const open = () => openDrawer(o, [...gOrg.children].find(g => g.getAttribute("aria-label").startsWith(`${o.city},`)));
+          li.addEventListener("click", open);
+          li.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+          return li;
+        }) : el("li", { class: "empty-note", text: "No alert with a known origin in this window." }));
+      }
+      if (byId("wm-cat")) {
+        fill("wm-cat", data.categories.length ? data.categories.map(c => el("li", {}, el("span", { text: c.category }),
+          el("span", { class: "n num", text: `${c.pct}%` }),
+          el("span", { class: "bar" }, width(el("span", { class: bucket(c.sev) === "hi" ? "hi" : null }), c.pct / 100))))
+          : el("li", { class: "empty-note", text: "No alerts in this window." }));
+      }
+      if (byId("wm-assets")) {
+        const max = Math.max(1, ...data.assets.map(a => a.n));
+        fill("wm-assets", data.assets.length ? data.assets.map((a, i) => el("li", { class: a.hi ? "hot" : null },
+          el("span", { class: "rk", text: String(i + 1).padStart(2, "0") }), el("span", { class: "nm", text: a.asset }),
+          el("span", { class: "num", text: n(a.n) }), el("span", { class: "bar" }, width(el("span", { class: "fill" }), a.n / max))))
+          : el("li", {}, el("span", { class: "empty", text: "No asset hit in this window." })));
+      }
+      txt("wm-total", n(data.total));
+      txt("wm-origins", n(data.origins.length));
+      txt("wm-cases", n(new Set(data.origins.flatMap(o => o.cases.map(c => c.case_id))).size));
+    }
+
+    function feedItem(f) {
+      const b = bucket(f.sev);
+      return el("li", { class: b },
+        el("span", { class: "tm", text: hms(f.at) }),
+        f.case_id ? el("a", { class: "nm", href: `/cases#${f.case_id}`, text: f.rule }) : el("span", { class: "nm", text: f.rule }),
+        el("span", { class: `sev ${f.sev}`, text: f.sev }),
+        el("span", { class: "where", text: `${f.src || "no source"} · ${f.city || "unknown origin"} → ${f.asset || "–"}${f.case_id ? ` · ${f.case_id}` : ""}` }));
+    }
+    function drawFeed(feed) {
+      if (!feedEl) return;
+      const max = war ? 18 : 7;
+      if (!seenFeed.size) {
+        fill(feedEl, feed.length ? feed.slice(0, max).map(feedItem) : el("li", { class: "empty-note", text: "No alerts yet." }));
+      } else {
+        const add = feed.filter(f => !seenFeed.has(f.id)).reverse();
+        if (add.length && feedEl.querySelector(".empty-note")) feedEl.replaceChildren();
+        add.forEach(f => feedEl.prepend(feedItem(f)));
+        while (feedEl.children.length > max) feedEl.lastChild.remove();
+      }
+      feed.forEach(f => seenFeed.add(f.id));
+    }
+
+    function fire() {
+      const a = fresh.shift() || (replay.length ? replay[ri++ % replay.length] : null);
+      if (!a) return;
+      const sev = bucket(a.sev);
+      const d = arcD(a.xy);
+      const tr = sv("path", { d, class: `arc trail ${sev}`, pathLength: 1 }, gArc);
+      const hd = sv("path", { d, class: `arc head ${sev}`, pathLength: 1 }, gArc);
+      setTimeout(() => {
+        const h = sv("circle", { class: "hit", cx: target[0], cy: target[1], r: 8 }, gTgt);
+        if (sev !== "hi") h.style.stroke = sev === "md" ? "#f4f4f4" : "#8a8a8e";
+        setTimeout(() => h.remove(), 1000);
+      }, 1300);
+      setTimeout(() => { tr.remove(); hd.remove(); }, 3300);
+    }
+    if (!reduce) setInterval(fire, war ? 650 : 1100);
+
+    return {
+      update(d, entity) {
+        drawTarget(entity);
+        const first = !data || data.window !== d.window;
+        data = d;
+        if (first) {
+          seenArcs.clear();
+          fresh = [];
+          ri = 0;
+        } else {
+          fresh.push(...d.arcs.filter(a => !seenArcs.has(a.id)).reverse());
+        }
+        d.arcs.forEach(a => seenArcs.add(a.id));
+        replay = d.arcs.slice().reverse();  // oldest first: the loop replays the window in the order it happened
+        drawOrigins();
+        drawSide();
+        drawFeed(d.feed);
+        if (first && !reduce) for (let i = 0; i < (war ? 6 : 4); i++) setTimeout(fire, i * 250);
+      },
+    };
   }
 
-  function flow(c, inbox, req) {
-    var steps = [
-      ["Alerts received", c.alerts_total, ""],
-      ["Forwarded to Temporal", inbox.forwarded, ""],
-      ["Broker decisions, shadow", c.decisions, ""],
-      ["Passed policy", req.validated, ""],
-      ["Blocked by policy", req.rejected, "hot"],
-      ["Executed", req.executed, "hot"]
+  // -- 01 overview ----------------------------------------------------------------------------------------
+  function drawChart(timeline) {
+    const c = byId("chart");
+    if (!c) return;
+    const title = c.querySelector("title");
+    c.replaceChildren(title);
+    const tot = timeline.map(h => h.high + h.medium + h.low);
+    const max = Math.max(4, ...tot) * 1.1;
+    const w = 960 / timeline.length;
+    [55, 110, 165].forEach(y => sv("line", { class: "grid", x1: 0, x2: 960, y1: y, y2: y }, c));
+    timeline.forEach((h, i) => {
+      let y = 220;
+      [["b-lo", h.low], ["b-md", h.medium], ["b-hi", h.high]].forEach(([k, v]) => {
+        const ht = (v / max) * 210;
+        y -= ht;
+        if (ht > 0) sv("rect", { class: k, x: (i * w + 8).toFixed(1), width: (w - 16).toFixed(1), y: y.toFixed(1), height: ht.toFixed(1) }, c);
+      });
+    });
+    sv("rect", { class: "now", x: ((timeline.length - 1) * w + 4).toFixed(1), width: (w - 8).toFixed(1), y: 4, height: 216 }, c);
+    title.textContent = `Hourly alert volume for the last 24 hours, peak ${n(Math.max(0, ...tot))} alerts in one hour`;
+    fill("axis", timeline.map((h, i) => el("span", { text: i % 3 === 0 ? hm(h.hour) : "" })));
+  }
+
+  function verdictCell(v, conf) {
+    return v ? [el("span", { class: `tag ${VERDICT_TAG[v] || ""}`, text: cap(v) }), el("div", { class: "small", text: conf !== null ? conf.toFixed(2) : "" })]
+      : el("span", { class: "k", text: "No verdict yet" });
+  }
+  const BROKER = {
+    pending_approval: ["wait", "Needs approval"], validated: ["act", "Passed policy, shadow"], rejected: ["hot", "Blocked by policy"],
+    executed: ["ok", "Executed"], expired: ["", "Expired"], approved: ["ok", "Approved"], denied: ["", "Rejected"],
+  };
+  function brokerTag(b) {
+    if (!b) return el("span", { class: "k", text: "–" });
+    const [cls, label] = BROKER[b.status] || ["", cap(b.status)];
+    return [el("span", { class: `tag ${cls}`, text: label }), " ", el("span", { class: "tag lv", text: b.level })];
+  }
+
+  function overview() {
+    const map = liveMap($(".mapcard[data-live]"));
+    const flow = (label, v, max, cls) => el("li", { class: cls || (v ? null : "zero") }, el("span", { class: "lbl", text: label }),
+      el("span", { class: "n num", text: n(v) }),
+      el("span", { class: "bar" }, width(el("span", { class: "fill" }), v ? Math.log10(v + 1) / Math.log10(max + 1) : 0)));
+    poll(async () => {
+      const [o, m] = await Promise.all([api("/api/overview"), api("/api/map?w=1h")]);
+      const s = o.stats;
+      txt("s-alerts", n(s.alerts_24h));
+      txt("s-alerts-t", `${n(s.events_24h)} raw events behind them`);
+      txt("s-cases", n(s.open_cases));
+      txt("s-cases-t", `${n(s.critical_cases)} critical · ${n(s.alerts_in_open)} alerts grouped`);
+      txt("s-decisions", n(s.decisions_24h));
+      txt("s-pending", n(s.pending));
+      txt("s-pending-t", s.oldest_pending ? `Oldest waiting ${ago(s.oldest_pending)}` : "Nothing waiting");
+      txt("s-median", secs(s.median_verdict_s));
+      txt("r-alerts", n(s.alerts_1h));
+      const max = Math.max(1, s.events_24h, s.alerts_24h);
+      fill("flow", flow("Log events", s.events_24h, max), flow("Alerts after dedup", s.alerts_24h, max),
+        flow("Cases opened", s.cases_24h, max), flow("Broker decisions, shadow", s.decisions_24h, max),
+        flow("Blocked by policy", s.blocked_24h, max, s.blocked_24h ? "hot" : "zero"), flow("Executed", s.executed_24h, max));
+      drawChart(o.timeline);
+      fill("ov-cases", o.open_cases.length ? o.open_cases.map(c => el("tr", {},
+        el("td", {}, sevTag(c.p, c.severity)),
+        el("td", {}, el("div", { class: "ttl" }, el("a", { href: `/cases#${c.case_id}`, text: c.title })),
+          el("div", { class: "mono", text: `${c.case_id} · ${c.primary.value || "–"} · ${ago(c.last_seen_at)} ago` })),
+        el("td", { class: "num", text: n(c.alerts) }),
+        el("td", {}, verdictCell(c.verdict, c.confidence)),
+        el("td", {}, brokerTag(c.broker)),
+        el("td", { class: "mono", text: c.jira || "–" })))
+        : el("tr", {}, el("td", { colspan: 6, class: "k", text: "No open case." })));
+      const rmax = Math.max(1, ...o.top_rules.map(r => r.n));
+      fill("rules", o.top_rules.length ? o.top_rules.map((r, i) => el("li", { class: bucket(r.severity) === "hi" ? "hot" : null },
+        el("span", { class: "rk", text: String(i + 1).padStart(2, "0") }), el("span", { class: "nm", text: r.rule_id }),
+        el("span", { class: "num", text: n(r.n) }), el("span", { class: "bar" }, width(el("span", { class: "fill" }), r.n / rmax))))
+        : el("li", {}, el("span", { class: "empty", text: "No alerts in the last 24 hours." })));
+      fill("integ", integItems(o.integrations, false));
+      txt("map-sub", `${plural(m.total, "alert")} in the last hour, ${n(m.placed)} with a known origin`);
+      map.update(m, shellData && shellData.entity);
+    });
+  }
+
+  // -- 02 threat map --------------------------------------------------------------------------------------
+  function threatMap() {
+    const card = $(".mapcard[data-live]");
+    const map = liveMap(card);
+    let w = "1h";
+    const seg = $(card.dataset.window);
+    const load = async () => {
+      const m = await api(`/api/map?w=${encodeURIComponent(w)}`);
+      if (m.window !== w) return;
+      const region = shellData && shellData.entity ? shellData.entity.region_label : "the cloud region";
+      txt("map-sub", `Alerts reaching ${region} in the last ${WINDOW_TEXT[w]}. ${plural(m.arcs.length, "arc")} replayed in order (max 200), new alerts fire first.`);
+      map.update(m, shellData && shellData.entity);
+    };
+    seg.addEventListener("click", e => {
+      const b = e.target.closest("button[data-w]");
+      if (!b || b.dataset.w === w) return;
+      w = b.dataset.w;
+      seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      load().catch(err => showError(`Could not load this window (${err.message}).`));
+    });
+    poll(load);
+  }
+
+  // -- 03 cases -------------------------------------------------------------------------------------------
+  const GLYPH = {
+    ip: g => sv("path", { class: "glyph", d: "M-68 -8L-60 0L-68 8L-76 0Z" }, g),
+    user: g => sv("circle", { class: "glyph", cx: -68, cy: 0, r: 7 }, g),
+    ak: g => sv("path", { class: "glyph", d: "M-72 -5a5 5 0 1 0 .1 0ZM-68 -1H-58V3H-61V6H-64V3H-68Z" }, g),
+    asset: g => sv("rect", { class: "glyph", x: -75, y: -6, width: 14, height: 12 }, g),
+  };
+  const REL = { targets: "targets", uses_key: "uses", moves_to: "moves to", authenticates_as: "logs in as", owns_key: "owns" };
+
+  function attackPath(d) {
+    const steps = d.steps.filter(s => s.src && s.dst);
+    const tactics = [];
+    steps.forEach(s => { const t = s.tactic_name || s.tactic || "Unmapped"; if (!tactics.includes(t)) tactics.push(t); });
+    const cols = 1 + tactics.length;
+    const W = Math.max(1200, 240 * cols);
+    const nodes = new Map();
+    const perCol = Array.from({ length: cols }, () => []);
+    const place = (ent, col, at, cls) => {
+      const k = `${ent.kind}:${ent.value}`;
+      if (!nodes.has(k)) { nodes.set(k, { ...ent, col, row: perCol[col].length, at, cls, hits: [] }); perCol[col].push(k); }
+      return nodes.get(k);
+    };
+    const edges = steps.map((s, i) => {
+      const col = 1 + tactics.indexOf(s.tactic_name || s.tactic || "Unmapped");
+      const a = place(s.src, i === 0 || s.src.kind === "ip" ? 0 : Math.max(0, col - 1), i, i === 0 ? "src" : "hit");
+      const b = place(s.dst, col, i, "hit");
+      b.hits.push(s.outcome);
+      return { a, b, s, i };
+    });
+    const rows = Math.max(1, ...perCol.map(c => c.length));
+    const H = Math.max(400, 96 * rows + 150);
+    const yc = 40 + (H - 40) / 2;
+    nodes.forEach(nd => {
+      nd.x = 240 * nd.col + 100;
+      nd.y = Math.round(yc + (nd.row - (perCol[nd.col].length - 1) / 2) * 96);
+      if (nd.cls === "hit" && nd.hits.length && nd.hits.every(o => o === "blocked")) nd.cls = "amb";
+    });
+    const STEP = 1.4;
+    const delay = i => `${(0.2 + i * STEP).toFixed(1)}s`;
+    const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+      "aria-label": `Attack path for ${d.case.case_id}: ${steps.map(s => `${s.title} (${s.outcome})`).join(", then ") || "no linked steps"}.` });
+    const defs = sv("defs", {}, svg);
+    const pat = sv("pattern", { id: "hatch", width: 8, height: 8, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" }, defs);
+    sv("rect", { width: 4, height: 8, fill: "#e3000f" }, pat);
+    const tac = sv("g", { class: "tac" }, svg);
+    ["Source", ...tactics].forEach((t, i) => {
+      sv("text", { x: 20 + 240 * i, y: 24, text: clip(t, 26) }, tac);
+      if (i) sv("line", { x1: 240 * i - 20, y1: 12, x2: 240 * i - 20, y2: H - 10 }, tac);
+    });
+    edges.forEach(({ a, b, s, i }) => {
+      let p;
+      if (a.col < b.col) { const m = (a.x + 88 + b.x - 88) / 2; p = `M${a.x + 88} ${a.y}C${m} ${a.y} ${m} ${b.y} ${b.x - 88} ${b.y}`; }
+      else if (a.col === b.col) p = a.y < b.y ? `M${a.x} ${a.y + 24}V${b.y - 24}` : `M${a.x} ${a.y - 24}V${b.y + 24}`;
+      else { const top = Math.min(a.y, b.y) - 60; p = `M${a.x} ${a.y - 24}C${a.x} ${top} ${b.x} ${top} ${b.x} ${b.y - 24}`; }
+      const g = sv("g", {}, svg);
+      g.style.setProperty("--d", delay(i));
+      sv("path", { class: "ed", d: p }, g);
+      sv("path", { class: s.outcome === "blocked" ? "run amb" : "run", pathLength: 1, d: p }, g);
+      sv("path", { class: "pk", pathLength: 1, d: p }, g);
+    });
+    const origin = d.case.origin || {};
+    nodes.forEach(nd => {
+      const g = sv("g", { class: `nd ${nd.cls}`, transform: `translate(${nd.x} ${nd.y})` }, svg);
+      g.style.setProperty("--d", delay(nd.at));
+      sv("title", { text: `${KIND[nd.kind] || nd.kind}: ${nd.value}` }, g);
+      if (nd.cls === "hit") sv("rect", { class: "ring", x: -88, y: -24, width: 176, height: 48 }, g);
+      sv("rect", { class: "core", x: -88, y: -24, width: 176, height: 48 }, g);
+      (GLYPH[nd.kind] || GLYPH.asset)(g);
+      sv("text", { x: -50, y: -3, text: clip(nd.value, 18) }, g);
+      const sub = nd.kind === "ip" && nd.cls === "src" ? [origin.city, origin.asn].filter(Boolean).join(" · ") || "Source IP"
+        : nd.cls === "amb" ? `${KIND[nd.kind] || nd.kind} · blocked` : KIND[nd.kind] || nd.kind;
+      sv("text", { class: "t2", x: -50, y: 13, text: clip(sub, 22) }, g);
+    });
+    edges.filter(e => e.s.outcome === "blocked").forEach(({ b, s, i }) => {
+      const g = sv("g", { class: "stop" }, svg);
+      g.style.setProperty("--d", delay(i + 0.6));
+      sv("rect", { x: b.x - 88, y: b.y + 30, width: 176, height: 10, fill: "url(#hatch)" }, g);
+      sv("text", { x: b.x - 88, y: b.y + 56, text: clip(`Blocked: ${s.title}`, 32) }, g);
+    });
+    if (d.also_in.length) {
+      const x = d.also_in[0];
+      const g = sv("g", { class: "xcase" }, svg);
+      g.style.setProperty("--d", delay(steps.length));
+      sv("rect", { x: 20, y: H - 60, width: 160, height: 40 }, g);
+      sv("text", { x: 32, y: H - 44, text: `Also in ${x.case_id}` }, g);
+      sv("text", { class: "t2", x: 32, y: H - 28, text: `same ${x.match}, ${ago(x.opened_at)} ago` }, g);
+    }
+    return { svg, total: 0.2 + steps.length * STEP + 1 };
+  }
+
+  function replay(wrap) {
+    const lm = $(".lm", wrap);
+    wrap.classList.remove("play");
+    lm.classList.remove("play");
+    void wrap.offsetWidth;  // restart the CSS animations
+    wrap.classList.add("play");
+    lm.classList.add("play");
+  }
+
+  function renderCase(d) {
+    const c = d.case;
+    const pend = d.requests.some(r => r.status === "pending_approval");
+    txt("c-id", c.case_id);
+    fill("c-pills", el("span", { class: "eyebrow mono", id: "c-id", text: c.case_id }), sevTag(c.p, c.severity),
+      c.status === "closed" ? el("span", { class: "tag", text: `Closed${c.close_reason ? ` · ${c.close_reason}` : ""}` })
+        : pend ? el("span", { class: "tag wait", text: "Waiting for approval" }) : el("span", { class: "tag", text: "Open" }),
+      el("span", { class: "sp" }), el("span", { class: "k", text: "Jira" }), el("span", { class: "mono", text: d.jira ? d.jira.key : "none yet" }),
+      el("span", { class: "k", text: "Lark" }), el("span", { class: "mono", text: plural(d.lark.messages, "message") }));
+    txt("c-title", c.title);
+    fill("c-keys", c.keys.map(k => el("span", { class: "tag", text: `${KIND[k.kind] || k.kind} ${k.value}` })),
+      c.assets.map(a => el("span", { class: "tag", text: a })));
+    const reached = d.steps.filter(s => s.outcome !== "blocked");
+    const blocked = d.steps.filter(s => s.outcome === "blocked");
+    const spanS = (ms(c.closed_at || c.last_seen_at) - ms(c.opened_at)) / 1000;
+    const score = (k, v, t, cls) => el("div", {}, el("span", { class: "k", text: k }), el("span", { class: cls || "v", text: v }), el("span", { class: "k", text: t }));
+    fill("c-score",
+      score("Priority", c.p, `${cap(c.severity)} severity × criticality ${c.criticality}`, "v red"),
+      score("Alerts in this case", n(c.alerts), `From ${plural(c.sources.length, "source")}: ${c.sources.join(", ")}`, "v num"),
+      score("Time span", `${hm(c.opened_at)} → ${hm(c.closed_at || c.last_seen_at)}`, `${span(spanS)}, ${c.status === "open" ? "still open" : "closed"}`, "v num"),
+      score("Furthest reach", reached.length ? reached[reached.length - 1].tactic_name || "–" : "–",
+        blocked.length ? `${plural(blocked.length, "step")} blocked` : "Nothing blocked"));
+
+    const wrap = byId("ap");
+    const ap = attackPath(d);
+    fill("lm", ap.svg);
+    wrap.style.setProperty("--total", `${ap.total.toFixed(1)}s`);
+    txt("ap-span", d.steps.length ? `${hms(d.steps[0].at)} → ${hms(d.steps[d.steps.length - 1].at)} ${TZL}` : "No steps");
+    fill("steps", d.steps.length ? d.steps.map((s, i) => {
+      const li = el("li", { class: s.outcome === "blocked" ? "blk" : null },
+        el("span", { class: "tm", text: hms(s.at) }),
+        el("span", { class: "ttl" }, s.title, s.technique ? el("span", { class: "tech", text: s.technique }) : null),
+        el("span", { class: "d", text: `Rule ${s.rule}. ${s.src && s.dst ? `${KIND[s.src.kind] || s.src.kind} ${s.src.value} ${REL[s.rel] || s.rel} ${s.dst.value}. ` : ""}${plural(s.events, "event")}, ${s.outcome}.` }));
+      li.style.setProperty("--d", `${(0.2 + i * 1.4).toFixed(1)}s`);
+      return li;
+    }) : el("li", { class: "empty-note", text: "No attack step recorded for this case." }));
+    if (reduce) { wrap.classList.add("play"); $(".lm", wrap).classList.add("play"); } else replay(wrap);
+
+    const counts = {};
+    d.alerts.forEach(a => a.match.forEach(m => { counts[m] = (counts[m] || 0) + 1; }));
+    const parts = Object.entries(counts).map(([m, k]) => [el("strong", { text: `Same ${m}` }), ` on ${plural(k, "alert")}`]);
+    fill("why", parts.length ? parts.flatMap((p, i) => (i ? [" and ", ...p] : p)) : "The first alert opened this case.",
+      parts.length ? " within the 30 min window." : "",
+      ` Priority is the highest severity (${c.severity}) times asset criticality (${c.criticality}).`);
+    txt("g1-sub", plural(c.alerts, "alert"));
+    fill("grp", d.alerts.map(a => el("li", {}, el("span", { class: "mono", text: hms(a.at) }), el("span", { class: "nm mono", text: a.rule }),
+      el("span", { class: `sev ${a.sev}`, text: a.sev }), el("span"),
+      el("span", { class: "r", text: a.match.length ? `match: ${a.match.join(", ")}` : "opened the case" }))));
+
+    const ai = d.ai;
+    txt("v-model", ai && ai.model ? `9router AI DECA · ${ai.model}` : "9router AI DECA");
+    const vv = txt("v-v", ai ? cap(ai.verdict) : "No verdict yet");
+    vv.style.color = ai && ai.verdict === "benign" ? "var(--ok)" : ai ? "" : "var(--tx-3)";
+    txt("v-c", ai && ai.confidence !== null ? ai.confidence.toFixed(2) : "–");
+    width(byId("v-bar"), ai ? ai.confidence : 0);
+    fill("v-ev", ai && ai.evidence_refs.length ? ai.evidence_refs.map(x => el("li", { text: x })) : el("li", { text: "No evidence cited." }));
+    txt("v-why", ai && ai.rationale ? ai.rationale : "");
+
+    const trace = d.trace.slice().reverse();
+    let no = 0;
+    fill("trace", trace.length ? trace.flatMap(t => [
+      ...t.attempts.map(a => el("li", {}, el("span", { class: "no", text: String(++no) }), el("span", { class: "tool", text: `9router ${a.model}` }),
+        el("span", { class: "k num", text: dur(a.ms) }),
+        el("span", { class: "out", text: a.ok ? `Answer ${a.schema_ok ? "matches" : "does not match"} the verdict schema · ${plural(a.tokens, "token")}` : `Failed: ${a.error || "no answer"}` }),
+        el("span", { class: "meta" }, el("span", { text: t.prompt_version || "" }), el("a", { href: "/automation", text: `audit #${t.seq}` })))),
+      el("li", {}, el("span", { class: "no", text: String(++no) }), el("span", { class: "tool", text: t.type === "ai.escalated" ? "escalated" : "verdict" }),
+        el("span", { class: "k num", text: hms(t.at) }),
+        el("span", { class: "out", text: `${cap(t.verdict) || "No verdict"}${t.confidence !== null && t.confidence !== undefined ? ` ${t.confidence.toFixed(2)}` : ""}.${t.escalated ? ` Escalated: ${t.escalated}.` : ""}${t.fallback_used ? " Fallback model used." : ""}` }),
+        el("span", { class: "meta" }, el("span", { text: `${t.model || ""}${t.target === "mock" ? " (mock)" : ""}` }), el("a", { href: "/automation", text: `audit #${t.seq}` }))),
+    ]) : el("li", { class: "empty-note", text: "No AI triage recorded for this case yet." }));
+
+    const CALL = { ok: ["ok", "Done"], duplicate: ["", "Duplicate skipped"], error: ["hot", "Error"] };
+    const rows = [
+      ...d.calls.map(x => { const [cls, label] = CALL[x.status] || ["", cap(x.status)];
+        return el("tr", {}, el("td", { class: "mono", text: x.op }), el("td", {}, "Automatic ", el("span", { class: "tag lv", text: "L0" })),
+          el("td", {}, el("span", { class: `tag ${cls}`, text: label }), " ", el("span", { class: "mono", text: x.ref || "" }),
+            el("div", { class: "small", text: `${hms(x.at)} · ${x.target}` }))); }),
+      ...d.requests.map(r => {
+        const [cls, label] = BROKER[r.status] || ["", cap(r.status)];
+        const note = r.status === "rejected" ? r.reasons[0] : r.rollback_at ? `Would expire ${hm(r.rollback_at)} ${TZL}`
+          : r.status === "pending_approval" && r.expires_at ? `Request expires ${hm(r.expires_at)} ${TZL}` : r.would_execute;
+        return el("tr", {}, el("td", { class: "mono", text: r.action }), el("td", {}, `${r.level_text} `, el("span", { class: "tag lv", text: r.level })),
+          el("td", {}, r.status === "pending_approval" ? el("a", { class: `tag ${cls}`, href: `/approvals#${r.id}`, text: label }) : el("span", { class: `tag ${cls}`, text: label }),
+            note ? el("div", { class: "small", text: note }) : null));
+      }),
     ];
-    var max = n(c.alerts_total), list = $("flow");
-    clear(list);
-    steps.forEach(function (s) {
-      var v = n(s[1]);
-      var li = el("li", (s[2] + (v ? "" : " zero")).trim());
-      li.appendChild(el("span", "lbl", s[0]));
-      li.appendChild(el("span", "n num", fmt(v)));
-      var bar = el("span", "bar"), fill = el("span", "fill");
-      fill.style.width = pct(v, max);
-      bar.appendChild(fill); li.appendChild(bar);
-      list.appendChild(li);
-    });
+    fill("resp", rows.length ? rows : el("tr", {}, el("td", { colspan: 3, class: "k", text: "No broker decision yet." })));
+
+    const req = d.requests.find(r => r.status === "pending_approval") || d.requests[d.requests.length - 1];
+    txt("pol-sub", req ? req.action : "");
+    const li = (cls, a, b) => el("li", { class: cls }, el("span", { text: a }), el("span", { class: "v", text: b }));
+    const killed = shellData && shellData.kill_switch && shellData.kill_switch.global_engaged;
+    fill("pol", !req ? li("pend", "No action proposed for this case", "–")
+      : req.status === "rejected" ? (req.reasons.length ? req.reasons : ["Rejected by the broker"]).map(r => li("no", r, "blocked"))
+        : [li(null, "Target is not on the protected list", "protected.yaml"),
+          li(killed ? "no" : null, killed ? "Kill switch is on" : "Kill switch is off", "checked by the broker"),
+          li(null, "Rate limit for this action", "within limit"),
+          li(null, "AI verdict has evidence and is above 0.80", ai && ai.confidence !== null ? ai.confidence.toFixed(2) : "–"),
+          req.level === "L2" || req.level === "L3" ? li(req.status === "pending_approval" ? "pend" : null, `Level ${req.level.slice(1)} needs one human approval`,
+            req.status === "pending_approval" ? "waiting" : req.status) : null]);
   }
 
-  function rules(list) {
-    var ol = $("rules");
-    clear(ol);
-    if (!list.length) { ol.appendChild(el("li", "empty", "No alerts in the last 24 hours")); return; }
-    var max = list[0].n;
-    list.forEach(function (r, i) {
-      var li = el("li", r.severity === "high" || r.severity === "critical" ? "hot" : "");
-      li.appendChild(el("span", "rk", String(i + 1).padStart(2, "0")));
-      li.appendChild(el("span", "nm", r.rule_id));
-      li.appendChild(el("span", "num", fmt(r.n)));
-      var bar = el("span", "bar"), fill = el("span", "fill");
-      fill.style.width = pct(r.n, max);
-      bar.appendChild(fill); li.appendChild(bar);
-      ol.appendChild(li);
+  function cases() {
+    let status = "open";
+    let shown = "";
+    let current = null;
+    const seg = byId("q-seg");
+    const want = () => (/^#CS-\d{1,9}$/.test(location.hash) ? location.hash.slice(1) : null);
+    const loadList = async () => {
+      const l = await api(`/api/cases?status=${status}`);
+      if (l.status !== status) return;
+      txt("q-sub", `${n(l.cases.length)} ${status}`);
+      const sel = want();
+      fill("queue", l.cases.length ? l.cases.map(c => {
+        const [cls, label] = c.status === "closed" ? ["", c.close_reason || "Closed"] : c.pending ? ["wait", "Needs approval"]
+          : c.broker ? BROKER[c.broker.status] || ["", cap(c.broker.status)] : ["", "Monitoring"];
+        return el("li", { class: c.case_id === sel ? "sel" : null },
+          el("a", { href: `#${c.case_id}`, "aria-current": c.case_id === sel ? "true" : null },
+            el("span", { class: "id" }, el("span", { text: c.case_id }), el("span", { text: ago(c.last_seen_at) })),
+            el("span", { class: "nm", text: c.title }),
+            el("span", { class: "pill-row" }, sevTag(c.p, c.severity), el("span", { class: `tag ${cls}`, text: label }),
+              el("span", { class: "k", text: plural(c.alerts, "alert") }))));
+      }) : el("li", { class: "empty-note", text: `No ${status} case.` }));
+      if (!sel && l.cases.length) { history.replaceState(null, "", `#${l.cases[0].case_id}`); current = null; }
+    };
+    const loadCase = async () => {
+      const id = want();
+      if (!id) return;
+      let d;
+      try { d = await api(`/api/cases/${id}`); } catch (e) {
+        if (e instanceof LoginRequired) throw e;
+        txt("c-title", `Case ${id} was not found`);
+        return;
+      }
+      const key = JSON.stringify(d);
+      if (id === current && key === shown) return;  // unchanged: keep the replay where it is
+      current = id;
+      shown = key;
+      renderCase(d);
+    };
+    $("[data-replay]").addEventListener("click", () => replay(byId("ap")));
+    seg.addEventListener("click", e => {
+      const b = e.target.closest("button[data-s]");
+      if (!b || b.dataset.s === status) return;
+      status = b.dataset.s;
+      seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      loadList().catch(err => showError(`Could not load cases (${err.message}).`));
     });
+    addEventListener("hashchange", () => {
+      document.querySelectorAll("#queue li").forEach(li => {
+        const on = $("a", li) && $("a", li).getAttribute("href") === location.hash;
+        li.classList.toggle("sel", on);
+        if ($("a", li)) { if (on) $("a", li).setAttribute("aria-current", "true"); else $("a", li).removeAttribute("aria-current"); }
+      });
+      loadCase().catch(err => showError(`Could not load the case (${err.message}).`));
+    });
+    poll(async () => { await loadList(); await loadCase(); });
   }
 
-  function render(s) {
-    var meta = s.meta || {};
-    $("synthetic").hidden = !meta.synthetic;
-    $("who-name").textContent = meta.user || "";
-    $("f-sha").textContent = "build " + (meta.sha || "–").slice(0, 12);
-
-    var c = s.counts, inbox = c.inbox || {}, req = c.requests || {};
-    $("r-alerts").textContent = fmt(c.alerts_last_hour);
-    $("r-total").textContent = fmt(c.alerts_total);
-    $("r-total-t").textContent = "Last at " + time(c.last_ingest);
-    $("r-forwarded").textContent = fmt(inbox.forwarded);
-    $("r-forwarded-t").textContent = fmt(inbox.pending) + " queued, " + fmt(inbox.dead) + " failed";
-    $("r-decisions").textContent = fmt(c.decisions);
-    $("r-validated").textContent = fmt(req.validated);
-    $("r-rejected").textContent = fmt(req.rejected);
-    $("f-ingest").textContent = "Last ingest " + time(c.last_ingest);
-    var tri = (s.feed || []).filter(function (a) { return a.triage; })[0];
-    $("f-triage").textContent = "Triage " + (tri ? tri.triage.model || "unknown" : "idle");
-
-    chart(s.timeline || []);
-    flow(c, inbox, req);
-    rules(s.top_rules || []);
-
-    var L = s.ledger, ok = !!L.ok;
-    $("chain-word").textContent = ok ? "intact" : "broken";
-    $("chain-dot").className = "dot " + (ok ? "ok" : "bad");
-    $("ledger-sub").textContent = "Checked " + time(L.checked_at);
-    var head = $("ledger-head");
-    clear(head);
-    head.appendChild(el("div", "state " + (ok ? "ok" : "bad"), ok ? "Hash chain verified" : "Hash chain failed verification"));
-    head.appendChild(el("div", "small", fmt(L.entries) + " entries, head #" + (L.head_seq === null ? "–" : L.head_seq)));
-    head.appendChild(el("div", "mono", L.head_hash || "–"));
-    (L.errors || []).forEach(function (e) { head.appendChild(el("div", "reasons", e)); });
-    var led = $("ledger");
-    clear(led);
-    (L.tail || []).forEach(function (e) {
-      var li = el("li");
-      li.appendChild(el("span", "tm", "#" + e.seq));
-      li.appendChild(el("span", "ev", e.event_type));
-      li.appendChild(el("span", "mono", time(e.recorded_at) + "  " + e.actor));
-      li.appendChild(el("span", "mono", short(e.prev_hash) + " → " + short(e.hash)));
-      led.appendChild(li);
-    });
-
-    var K = s.kill_switch;
-    document.body.classList.toggle("killed", !!K.any_engaged);
-    $("kill").textContent = "Kill switch " + (K.global_engaged ? "engaged, global" : K.any_engaged ? "engaged, partial" : "off");
-    var ks = $("ks");
-    clear(ks);
-    if (!K.scopes.length) ks.appendChild(el("li", "small", "Never changed. Every action follows policy"));
-    K.scopes.forEach(function (k) {
-      var li = el("li");
-      li.appendChild(el("span", "tag " + (k.engaged ? "hot" : "ok"), k.engaged ? "Engaged" : "Off"));
-      li.appendChild(el("span", "mono", k.scope + ", " + time(k.changed_at)));
-      ks.appendChild(li);
-    });
-
-    var feed = $("feed");
-    clear(feed);
-    if (!s.feed.length) {
-      var tr = el("tr"), td = el("td", "muted", "No alerts yet");
-      td.colSpan = 5; tr.appendChild(td); feed.appendChild(tr);
+  // -- 04 approvals ---------------------------------------------------------------------------------------
+  function approvals() {
+    let data = null;
+    let curId = null;
+    const shortId = id => `REQ-${id.slice(0, 8)}`;
+    const left = r => Math.max(0, (ms(r.expires_at) - now()) / 1000);
+    const want = () => (data && data.pending.find(r => `#${r.id}` === location.hash)) || (data && data.pending[0]) || null;
+    function timer() {
+      const r = want();
+      const t = byId("a-timer");
+      if (!r || !t || !r.expires_at) return;
+      const s = left(r);
+      t.textContent = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+      width(byId("a-ttl"), s / Math.max(1, (ms(r.expires_at) - ms(r.created_at)) / 1000));
     }
-    s.feed.forEach(function (a) { feed.appendChild(row(a)); });
-    $("updated").textContent = "Updated " + time(s.now);
-    $("error").hidden = true;
+    function render() {
+      const r = want();
+      fill("aq", data.pending.length ? data.pending.map(q => el("li", { class: r && q.id === r.id ? "sel" : null },
+        el("a", { href: `#${q.id}`, "aria-current": r && q.id === r.id ? "true" : null },
+          el("span", { class: "id" }, el("span", { text: shortId(q.id) }), el("span", { text: q.expires_at ? `${span(left(q))} left` : "no expiry" })),
+          el("span", { class: "nm", text: `${q.action} · ${q.case_id || "no case"}` }))))
+        : el("li", { class: "empty-note", text: "Nothing waiting." }));
+      txt("aq-sub", `${n(data.pending.length)} waiting`);
+      fill("recent", data.recent.length ? data.recent.map(x => el("li", {}, el("span", { class: "tm", text: when(x.at) }),
+        el("span", { class: "ev", text: `${cap(x.status)} · ${x.action}` }),
+        el("span", { class: "mono", text: `${x.case_id || "–"}${x.reason ? ` · ${x.reason}` : ""}` })))
+        : el("li", {}, el("span", { class: "ev k", text: "No decision yet." })));
+      if (!r) {
+        curId = null;
+        fill("a-pills", el("span", { class: "eyebrow mono", text: "Approvals" }));
+        txt("a-title", "Nothing is waiting for approval");
+        txt("a-lede", "Level 2 and 3 actions the broker accepts in shadow mode appear here with a countdown.");
+        ["a-score", "a-diff", "chain", "a-ev"].forEach(id => fill(id));
+        return;
+      }
+      if (r.id === curId && byId("a-timer")) { timer(); return; }
+      curId = r.id;
+      fill("a-pills", el("span", { class: "eyebrow mono", text: shortId(r.id) }), el("span", { class: "tag wait", text: "Needs approval" }),
+        el("span", { class: "tag lv", text: r.level }), el("span", { class: "sp" }), el("span", { class: "k", text: "From case" }),
+        r.case_id ? el("a", { class: "mono", href: `/cases#${r.case_id}`, text: r.case_id }) : el("span", { class: "mono", text: "–" }));
+      txt("a-title", r.would_execute || r.action);
+      txt("a-lede", `Proposed by AI triage, checked by the broker. ${r.case_id ? `Case ${r.case_id}: ${r.case_title}.` : ""}`);
+      const ai = r.ai || {};
+      fill("a-score",
+        el("div", {}, el("span", { class: "k", text: "Time left to decide" }), el("span", { class: "timer", id: "a-timer", text: r.expires_at ? "--:--" : "no expiry" }),
+          el("div", { class: "ttlbar" }, el("i", { id: "a-ttl" }))),
+        el("div", {}, el("span", { class: "k", text: "AI verdict" }), el("span", { class: "v red", text: cap(ai.verdict) || "–" }),
+          el("span", { class: "k", text: ai.confidence !== null && ai.confidence !== undefined ? `${ai.confidence.toFixed(2)} confidence` : "no confidence" })),
+        el("div", {}, el("span", { class: "k", text: "Policy check" }), el("span", { class: "v okc", text: "Passed" }), el("span", { class: "k", text: "Every broker check" })),
+        el("div", {}, el("span", { class: "k", text: "If nobody decides" }), el("span", { class: "v", text: "No action" }),
+          el("span", { class: "k", text: r.expires_at ? `Request expires at ${hm(r.expires_at)} ${TZL}` : "Request has no expiry" })));
+      fill("a-diff",
+        el("div", {}, el("span", { class: "k", text: "What happens if approved" }), el("span", { text: `${r.would_execute || r.action}.${r.rollback_plan ? ` ${r.rollback_plan}` : ""}` })),
+        el("div", {}, el("span", { class: "k", text: "Business impact" }), el("span", { text: r.impact || "Not described by the catalog." })));
+      let t = ms(r.created_at);
+      const lvl = r.escalation_level || 0;
+      const chain = data.ladder.map((s, i) => {
+        const start = t;
+        t += (s.timeout_min || 0) * 60000;
+        const cls = i < lvl ? "done" : i === lvl ? "now" : null;
+        const iso = new Date(start).toISOString();
+        return el("li", { class: cls }, el("span", { class: "st", text: cls === "done" ? `${hm(iso)} · sent` : cls === "now" ? `Now · ${ago(iso)}` : `At ${hm(iso)}` }),
+          el("strong", { text: s.role }), el("span", { class: "k", text: s.approvers.length ? `${s.approvers.join(", ")}, via Lark` : "via Lark" }));
+      });
+      if (!chain.length) chain.push(el("li", { class: "now" }, el("span", { class: "st", text: "Now" }), el("strong", { text: "No escalation ladder" }), el("span", { class: "k", text: "Set one in the Lark settings" })));
+      chain.push(el("li", {}, el("span", { class: "st", text: r.expires_at ? `At ${hm(r.expires_at)}` : "–" }), el("strong", { text: "Expires" }),
+        el("span", { class: "k", text: "No action taken, case stays open" })));
+      fill("chain", chain);
+      fill("a-ev", r.evidence.length ? r.evidence.map(x => el("li", { text: x })) : el("li", { text: "No evidence attached." }));
+      timer();
+    }
+    addEventListener("hashchange", () => { if (data) render(); });
+    setInterval(timer, 1000);
+    poll(async () => { data = await api("/api/approvals"); render(); });
   }
 
-  function poll() {
-    fetch("/api/state", { credentials: "same-origin", cache: "no-store" })
-      .then(function (r) {
-        if (r.status === 401) { window.location.assign("/login"); return null; }
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
-      })
-      .then(function (s) { if (s) render(s); })
-      .catch(function (e) {
-        var b = $("error");
-        b.textContent = "Could not load data (" + e.message + "). Retrying";
-        b.hidden = false;
-      })
-      .finally(function () { setTimeout(poll, POLL_MS); });
+  // -- 05 automation --------------------------------------------------------------------------------------
+  function automation() {
+    poll(async () => {
+      const a = await api("/api/automation");
+      fill("acts", !a.catalog_loaded ? el("tr", {}, el("td", { colspan: 6, class: "k", text: "The policy catalog could not be loaded. Nothing can run until it is fixed." }))
+        : a.actions.map(x => {
+          const lv = Number(x.level.slice(1));
+          const bar = el("span", { class: `lvl${lv >= 2 ? ` l${lv}` : ""}` }, [0, 1, 2, 3].map(i => el("i", { class: i <= lv ? "on" : null })));
+          return el("tr", {}, el("td", { class: "mono", text: x.id }),
+            el("td", {}, bar, `${x.level_text} `, el("span", { class: "tag lv", text: x.level })),
+            el("td", {}, el("span", { class: "tag", text: "Shadow" }), el("div", { class: "small", text: `target: ${x.target_mode === "approval" ? "with approval" : "automatic"}` })),
+            x.shadow_total ? el("td", {}, el("div", { class: "promo" }, el("span", { class: "bar" }, width(el("i"), x.shadow_validated / x.shadow_total)),
+              el("span", { class: "k", text: `${n(x.shadow_validated)} of ${n(x.shadow_total)} passed policy · ${n(x.shadow_rejected)} blocked` })))
+              : el("td", { class: "k", text: "No shadow decision yet" }),
+            el("td", { class: "mono" }, x.rate_per_hour ? `${x.rate_per_hour} per hour` : "–", x.rollback ? el("div", { class: "small", text: `undo: ${x.rollback}` }) : null),
+            el("td", { class: "num", text: n(x.n24) }));
+        }));
+      fill("ttl", a.expiring.length ? a.expiring.map(x => {
+        const total = ms(x.until) - ms(x.from);
+        return el("div", { class: "ttl-row" },
+          el("span", {}, el("span", { class: "mono", text: x.action }), ` ${x.what || ""} `, el("span", { class: "k", text: `· ${x.case_id || "–"}` })),
+          el("span", { class: "r", text: `expires ${hm(x.until)} ${TZL}` }),
+          el("span", { class: "ttlbar" }, width(el("i"), total > 0 ? (ms(x.until) - now()) / total : 0)));
+      }) : el("p", { class: "empty-note", text: "No reversible action is active." }));
+      fill("integ", integItems(a.integrations, true));
+      fill("changes", a.changes.length ? a.changes.map(x => el("li", {}, el("span", { class: "tm", text: dayOf(x.at) }),
+        el("span", { class: "ev", text: `${INTEG[x.integration] ? INTEG[x.integration][1] : x.integration} config v${x.version} · target ${x.target}` }),
+        el("span", { class: "mono", text: `${x.by || "–"}${x.note ? ` · ${x.note}` : ""}` })))
+        : el("li", {}, el("span", { class: "ev k", text: "No configuration change recorded." })));
+      const l = a.ledger;
+      txt("led-n", plural(l.entries, "entry").replace("entrys", "entries"));
+      const st = txt("led-state", l.ok === true ? "Audit trail valid" : l.ok === false ? "Audit trail broken" : "Audit trail not checked yet");
+      st.className = l.ok === true ? "state ok" : l.ok === false ? "state bad" : "state";
+      txt("led-k", l.checked_at ? `Checked ${hm(l.checked_at)} ${TZL} · head #${l.head_seq}${l.errors && l.errors.length ? ` · ${l.errors[0]}` : ""}` : "");
+      txt("led-hash", l.head_hash || "");
+      fill("led", l.tail.map(x => el("li", {}, el("span", { class: "tm", text: `#${x.seq}` }), el("span", { class: "ev", text: x.event_type }),
+        el("span", { class: "mono", text: `${hms(x.recorded_at)} · ${x.actor}` }))));
+    });
   }
 
-  function tick() { $("clock").textContent = new Date().toLocaleTimeString("en-GB", tz); }
-  document.addEventListener("DOMContentLoaded", function () { tick(); setInterval(tick, 1000); poll(); });
+  // -- 06 scenario tests (sandbox only) -------------------------------------------------------------------
+  function scenarios() {
+    const RES = { pass: ["pass", "PASS"], fail: ["fail", "FAIL"], error: ["fail", "ERROR"] };
+    poll(async () => {
+      const s = await api("/api/scenarios");
+      if (s.hidden) {
+        const pe = $(".prod-empty");
+        if (pe) pe.classList.remove("prd-only");
+        document.querySelectorAll("main .sbx-only").forEach(e => { e.hidden = true; });
+        return;
+      }
+      const run = s.run;
+      const failed = run ? run.scenarios.filter(x => x.status !== "pass") : [];
+      txt("r-at", run ? hm(run.finished_at) : "–");
+      txt("r-dur", run ? `hypersoar scenario run · ${secs((ms(run.finished_at) - ms(run.started_at)) / 1000)}` : "No run recorded yet");
+      txt("r-pass", run ? n(run.passed) : "–");
+      txt("r-of", run ? `of ${plural(run.total, "scenario")}` : "–");
+      txt("r-fail", run ? n(run.total - run.passed) : "–");
+      txt("r-failt", failed.length ? clip(failed.map(x => x.id).join(", "), 40) : run ? "None failed" : "–");
+      txt("r-hist", n(s.history.length));
+      txt("r-sha", run && run.git_sha ? run.git_sha : "–");
+      fill("sc", !run ? el("tr", {}, el("td", { colspan: 5, class: "k", text: "No scenario run recorded yet. Run hypersoar scenario run in the sandbox." }))
+        : run.scenarios.flatMap(x => {
+          const [cls, label] = RES[x.status] || ["fail", x.status.toUpperCase()];
+          const names = x.checks.map(c => c.name);
+          const row = el("tr", { class: x.status === "pass" ? null : "failrow" }, el("td", { class: "mono", text: x.id }), el("td", { class: "ttl", text: x.title }),
+            el("td", { class: "k", text: names.length > 3 ? `${names.slice(0, 3).join(", ")} +${names.length - 3}` : names.join(", ") || "–" }),
+            el("td", { class: "num k", text: secs(x.ms / 1000) }), el("td", {}, el("span", { class: `res ${cls}`, text: label })));
+          if (x.status === "pass" || !x.failures.length) return [row];
+          return [row, el("tr", { class: "detail" }, el("td", { colspan: 5 }, el("div", { class: "expect" },
+            el("div", {}, el("span", { class: "k", text: "Expected" }), x.failures.map(f => el("span", { text: `${f.name}: ${f.expected}` }))),
+            el("div", {}, el("span", { class: "k", text: "Got" }), x.failures.map(f => el("span", { class: "bad", text: `${f.name}: ${f.got}` }))))))];
+        }));
+      const sd = s.seeding;
+      txt("bot-n", String(sd.per_min_10m));
+      const bs = txt("bot-st", sd.per_min_10m > 0 ? "Running" : "Idle");
+      bs.className = sd.per_min_10m > 0 ? "r tag ok" : "r tag";
+      const max = Math.max(1, ...sd.spark);
+      const step = 200 / Math.max(1, sd.spark.length - 1);
+      $("#spark path").setAttribute("d", sd.spark.length ? `M${sd.spark.map((v, i) => `${(i * step).toFixed(1)} ${(38 - (v / max) * 34).toFixed(1)}`).join("L")}` : "M0 40H200");
+      byId("spark").setAttribute("aria-label", `Seeded alerts per minute over the last hour, peak ${max}`);
+      fill("mix", sd.mix.length ? sd.mix.map(m => el("li", {}, el("span", { text: m.category }), el("span", { class: "v", text: `${m.pct}%` })))
+        : el("li", { class: "pend" }, el("span", { text: "No seeded alert in the last 24 hours" }), el("span", { class: "v", text: "–" })));
+      const gate = (cls, a, b) => el("li", { class: cls }, el("span", { text: a }), el("span", { class: "v", text: b }));
+      fill("gates",
+        gate(run && run.passed === run.total ? null : "no", "All scenarios pass", run ? `${run.passed} / ${run.total}` : "no run"),
+        gate("pend", "No synthetic rows in the production database", "preflight --production"),
+        gate("pend", "Secrets present for Lark, Jira, 9router", "preflight --production"),
+        gate("pend", "protected.yaml filled with real assets", "preflight --production"),
+        gate("pend", "Integrations reachable from production", "connection test"));
+    });
+  }
+
+  // -- start ----------------------------------------------------------------------------------------------
+  buildShell();
+  const SCREENS = { overview, map: threatMap, cases, approvals, automation, scenarios };
+  (async () => {
+    try { await refreshShell(); } catch (e) { if (e instanceof LoginRequired) return; showError(`Could not load the header (${e.message}).`); }
+    setInterval(() => { if (!document.hidden) refreshShell().catch(() => {}); }, POLL_MS);
+    (SCREENS[screen] || (() => {}))();
+  })();
 })();

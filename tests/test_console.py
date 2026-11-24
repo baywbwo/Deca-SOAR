@@ -203,21 +203,67 @@ def test_security_headers(console):
     assert "font-src 'self';" in h["content-security-policy"] and "default-src 'none'" in h["content-security-policy"]
 
 
+PAGES = {"/": "overview", "/map": "map", "/cases": "cases", "/approvals": "approvals",
+         "/automation": "automation", "/scenarios": "scenarios"}
+
+
 def test_static_has_no_inline_code_and_unknown_files_404(console):
     from hypersoar.console.app import STATIC
-    page = (STATIC / "index.html").read_text()
-    assert "<script>" not in page and "style=" not in page and "onclick" not in page
+    for name in PAGES.values():
+        page = (STATIC / f"{name}.html").read_text()
+        assert "<script>" not in page and "style=" not in page and "onclick" not in page, name
+        assert page.count("<script") == 1 and '<script src="/static/console.js" defer></script>' in page, name
+        assert f'data-screen="{name}"' in page and "http" not in page.replace('xmlns="http://www.w3.org/2000/svg"', "")
     js = (STATIC / "console.js").read_text()
-    assert "innerHTML" not in js and "eval(" not in js
+    assert "innerHTML" not in js and "eval(" not in js and "new Function" not in js and "outerHTML" not in js
+    css = (STATIC / "console.css").read_text()
+    assert "url(#" not in css and "@import" not in css and "url(http" not in css
     assert console.get("/static/console.js").status_code == 200
     assert console.get("/static/../app.py").status_code == 404
     assert console.get("/static/index.html").status_code == 404
-    for name, mime in [("intercept.svg", "image/svg+xml"), ("geist-sans.woff2", "font/woff2"),
-                       ("geist-mono.woff2", "font/woff2")]:
+    for name, mime in [("intercept.svg", "image/svg+xml"), ("worldmap.svg", "image/svg+xml"),
+                       ("geist-sans.woff2", "font/woff2"), ("geist-mono.woff2", "font/woff2")]:
         r = console.get(f"/static/{name}")
         assert r.status_code == 200 and r.headers["content-type"].startswith(mime)
-    art = (STATIC / "intercept.svg").read_text()
-    assert "<script" not in art and "href=\"http" not in art and "url(http" not in art
+    for name in ("intercept.svg", "worldmap.svg"):
+        art = (STATIC / name).read_text()
+        assert "<script" not in art and "href=\"http" not in art and "url(http" not in art and " on" not in art.lower()
+
+
+def test_pages_and_api_need_a_session(console):
+    for path in PAGES:
+        r = console.get(path, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/login", path
+    for path in ("/api/shell", "/api/overview", "/api/map?w=1h", "/api/cases", "/api/cases/CS-1001",
+                 "/api/approvals", "/api/automation", "/api/scenarios", "/api/state"):
+        r = console.get(path)
+        assert r.status_code == 401 and r.json() == {"detail": "login required"}, path
+
+
+def test_pages_render_with_csp_and_sandbox_marker(console):
+    assert _login(console).status_code == 303
+    for path, name in PAGES.items():
+        r = console.get(path)
+        assert r.status_code == 200 and f'<body class="app" data-screen="{name}"' in r.text, path
+        assert "unsafe-inline" not in r.headers["content-security-policy"]
+    assert console.get("/api/map?w=2d").status_code == 422
+    assert console.get("/api/cases?status=all").status_code == 422
+    assert console.get("/api/cases/CS-9999").status_code == 404
+    assert console.get("/api/cases/1;drop").status_code == 404
+
+
+def test_production_marks_pages_and_hides_scenarios(console):
+    from hypersoar.console.app import fastapi_app
+    assert _login(console).status_code == 303
+    console_env_install = fastapi_app.state.install
+    real = console_env_install.get
+    console_env_install.get = lambda pool: {"mode": "production", "entity_id": "dob"}
+    try:
+        assert '<body class="app prod" data-screen="scenarios"' in console.get("/scenarios").text
+        assert console.get("/api/scenarios").json() == {"hidden": True}
+        assert console.get("/api/shell").json()["mode"] == "production"
+    finally:
+        console_env_install.get = real
 
 
 def test_no_write_endpoints():
@@ -263,6 +309,42 @@ def test_state_shows_alert_verdict_and_shadow_decision(client, principals, pool,
     assert len(s["timeline"]) == 24 and sum(h["high"] for h in s["timeline"]) == 2
     assert s["top_rules"] == [{"rule_id": "waf.sqli.burst", "source": "waf", "n": 2, "severity": "high"}]
     assert "203.0.113.44" not in r.text and "198.51.100.7" not in r.text
+
+
+def test_new_api_shapes_and_no_raw_addresses(client, principals, pool, settings, tmp_path, conn,
+                                             console_env, viewer):
+    ips = ("203.0.113.44", "198.51.100.7")
+    ingest(pool, settings, tmp_path, [waf_alert(ip=ip) for ip in ips])
+    for r in conn.execute("SELECT alert_id, alert FROM gateway.inbox_event").fetchall():
+        tok = r["alert"]["entities"]["src_ip"]
+        resp = client.post("/v1/actions/requests", headers=principals["worker-svc"],
+                           json=body(str(r["alert_id"]), params={"ip_token": tok, "waf_instance": "waf-lab"}))
+        assert resp.status_code == 201
+    from hypersoar.console.app import app
+    with TestClient(app, base_url="https://testserver") as c:
+        assert _login(c).status_code == 303
+        out = {p: c.get(p) for p in ("/api/shell", "/api/overview", "/api/map?w=15m", "/api/map?w=24h",
+                                     "/api/cases?status=open", "/api/cases?status=closed", "/api/approvals",
+                                     "/api/automation", "/api/scenarios")}
+        assert all(r.status_code == 200 for r in out.values()), {p: r.status_code for p, r in out.items()}
+        cases = out["/api/cases?status=open"].json()["cases"]
+        details = [c.get(f"/api/cases/{x['case_id']}") for x in cases]
+    shell = out["/api/shell"].json()
+    assert shell["meta"]["read_only"] is True and shell["mode"] == "sandbox" and shell["ledger"]["ok"] is True
+    assert shell["kill_switch"]["global_engaged"] is False
+    ov = out["/api/overview"].json()
+    assert ov["stats"]["alerts_24h"] == 2 and len(ov["timeline"]) == 24
+    m = out["/api/map?w=24h"].json()
+    assert m["window"] == "24h" and m["total"] == 2 and len(m["arcs"]) <= 200
+    assert {a["sev"] for a in m["arcs"]} <= {"critical", "high", "medium", "low", "info"}
+    assert cases and all(d.status_code == 200 for d in details)
+    d = details[0].json()
+    assert {"case", "alerts", "steps", "ai", "trace", "requests", "calls", "also_in"} <= set(d)
+    auto = out["/api/automation"].json()
+    assert auto["catalog_loaded"] is True and auto["ledger"]["tail"]
+    for p, r in [*out.items(), *(("detail", x) for x in details)]:
+        for ip in ips:
+            assert ip not in r.text, (p, ip)
 
 
 # Synthetic generator ------------------------------------------------------------------------------
@@ -313,3 +395,9 @@ def test_synthetic_run_appends_whole_lines(tmp_path):
     # The first campaign is always the AccessKey chain, the second one of the weighted others.
     assert json.loads(lines[0])["rule_id"] == "actiontrail.ak_unusual_ip"
     assert {json.loads(x)["campaign"] for x in lines} >= {"ak_lateral"}
+
+
+def test_expiring_shows_the_target_not_the_whole_call():
+    from hypersoar.console.views import _target
+    assert _target("waf.ip_blacklist.add(ip_token=tok_ip_98fd, ttl_s=86400, waf_instance=waf-jkt-01)") == "tok_ip_98fd"
+    assert _target("noop") == "noop" and _target(None) is None
