@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 
 from deca_soar.common.config import DEFAULT_INTERNAL_CIDRS, Settings, _cidrs
 from deca_soar.common.db import make_pool, migrate
+from deca_soar.common.pii import vault_public_key
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -87,7 +88,8 @@ def settings(db_url) -> Settings:
     return Settings(
         db_url=db_url,
         tokenization_key=b"\x01" * 32,
-        vault_key=b"\x02" * 32,
+        vault_public_key=vault_public_key(b"\x02" * 32),
+        vault_private_key=b"\x02" * 32,
         internal_cidrs=_cidrs(DEFAULT_INTERNAL_CIDRS),
         policy_dir=ROOT / "policy",
     )

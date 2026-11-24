@@ -18,7 +18,7 @@ _GRANTS = {
     "approver": {READ, REQUEST_ACTION, APPROVE},
     "admin": {READ, REQUEST_ACTION, APPROVE, KILL_SWITCH, MANAGE},
 }
-# Machines (Tracecat, the agent) have no approver identity (design 6.3 item 6).
+# Machines (the workflow worker, the agent) have no approver identity (design 6.3 item 6).
 _HUMAN_ONLY = {APPROVE, KILL_SWITCH, MANAGE}
 
 

@@ -34,6 +34,7 @@ class Broker:
     protected: Protected
     vault: Vault
     internal_cidrs: list = field(default_factory=list)
+    allow_test_nets: bool = False
 
 
 def principal_by_token(conn: psycopg.Connection, token: str) -> Principal | None:
@@ -104,8 +105,10 @@ def submit(conn: psycopg.Connection, b: Broker, who: Principal, body: dict) -> t
         ledger.canonical_json({"alert_id": alert_id, "action": action, "params": raw_params}).encode()
     ).hexdigest()
 
+    # Scoped per principal (review F6): another caller's key never replays someone else's request.
     existing = conn.execute(
-        "SELECT * FROM broker.action_request WHERE idempotency_key = %s", (idem,)
+        "SELECT * FROM broker.action_request WHERE requested_by = %s AND idempotency_key = %s",
+        (who.principal_id, idem),
     ).fetchone()
     if existing is not None:
         if existing["request_sha256"] != req_hash:
@@ -135,7 +138,9 @@ def submit(conn: psycopg.Connection, b: Broker, who: Principal, body: dict) -> t
         reasons, params, level, target_mode = list(st.reasons), st.params, spec.level, spec.mode
         if st.ok and st.target_token:
             value = b.vault.reveal(conn, st.target_token)
-            reasons += policy.check_target(spec.target_kind, value, b.protected, b.internal_cidrs)
+            reasons += policy.check_target(
+                spec.target_kind, value, b.protected, b.internal_cidrs, allow_test_nets=b.allow_test_nets
+            )
         scope = policy.rate_scope(spec, params)
         if not reasons and spec.rate_per_hour:
             # Serialise per scope so two concurrent requests cannot both squeeze under the limit.
@@ -150,6 +155,10 @@ def submit(conn: psycopg.Connection, b: Broker, who: Principal, body: dict) -> t
         intent = policy.would_execute(spec, params) if not reasons else None
 
     killed = kill_switch_state(conn, action)
+    if killed:
+        # An engaged kill switch blocks the request outright, shadow or not (review F6).
+        reasons.append("kill switch engaged")
+        intent = None
     if reasons:
         status = "rejected"
     elif target_mode == "approval":
@@ -219,6 +228,8 @@ def decide_approval(conn: psycopg.Connection, who: Principal, request_id: str, a
         raise Conflict(f"request is {r['status']}")
     if str(r["requested_by"]) == who.principal_id:
         raise PermissionError("requester cannot approve their own request")
+    if approve and kill_switch_state(conn, r["action"]):
+        raise Conflict("kill switch engaged")
     if datetime.now(UTC) - r["created_at"] > APPROVAL_TTL:
         conn.execute("UPDATE broker.action_request SET status = 'expired' WHERE request_id = %s", (request_id,))
         ledger.append(conn, "action.expired", f"principal:{who.name}", {"request_id": request_id})

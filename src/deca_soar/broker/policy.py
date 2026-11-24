@@ -1,7 +1,7 @@
 """Deterministic request validation (design 6.3 item 2). Pure functions: no DB, no network.
 
 The service layer feeds in the alert as the gateway stored it and the revealed target value;
-everything the caller (Tracecat, the LLM) supplies is treated as untrusted.
+everything the caller (the workflow worker, the LLM) supplies is treated as untrusted.
 """
 
 from __future__ import annotations
@@ -11,9 +11,15 @@ import re
 from dataclasses import dataclass, field
 
 from deca_soar.broker.catalog import SEVERITIES, VERDICTS, ActionSpec, Protected
+from deca_soar.common.pii import canonical_ip
 
 DECISION_SOURCES = ("rule", "llm")
 TOKEN_KIND_RE = re.compile(r"^tok_([a-z]+)_[0-9a-f]{16}$")
+# RFC 5737 / RFC 3849 documentation ranges. Not globally routable, so rejected as block targets,
+# except in tests and the disposable e2e stack (never with DECA_ENV=production).
+TEST_NETS = tuple(
+    ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
+)
 
 
 @dataclass
@@ -115,23 +121,29 @@ def check_target(
     value: str | None,
     protected: Protected,
     internal_cidrs: list,
+    *,
+    allow_test_nets: bool = False,
 ) -> list[str]:
     """Checks on the real (detokenised) target. Reasons never include the value itself."""
     if value is None:
         return ["target token unknown to vault"]
     if kind == "ip":
         try:
-            ip = ipaddress.ip_address(value)
+            ip = canonical_ip(value)
         except ValueError:
             return ["target is not an IP address"]
-        if (
-            ip.is_loopback or ip.is_multicast or ip.is_unspecified or ip.is_link_local or ip.is_reserved
-            or any(ip in net for net in internal_cidrs)
-        ):
-            return ["target is an internal or special-purpose address"]
+        # Protected first, so a protected address is reported as such whatever else it is.
         for e in protected.networks:
             if ip.version == e.network.version and ip in e.network:
                 return [f"target is protected ({e.label[:60]})"]
+        if (
+            ip.is_loopback or ip.is_multicast or ip.is_unspecified or ip.is_link_local or ip.is_reserved
+            or any(ip.version == net.version and ip in net for net in internal_cidrs)
+        ):
+            return ["target is an internal or special-purpose address"]
+        test_net = allow_test_nets and any(ip.version == n.version and ip in n for n in TEST_NETS)
+        if not ip.is_global and not test_net:
+            return ["target is not a globally routable address"]
         return []
     if kind in ("user", "ak"):
         return ["target is a protected principal"] if value in protected.principals else []

@@ -14,8 +14,8 @@ from helpers import ingest, waf_alert
 @pytest.fixture
 def env(monkeypatch, settings):
     monkeypatch.setenv("DECA_DB_URL", settings.db_url)
-    monkeypatch.setenv("DECA_TOKENIZATION_KEY", settings.tokenization_key.hex())
-    monkeypatch.setenv("DECA_VAULT_KEY", settings.vault_key.hex())
+    monkeypatch.setenv("DECA_VAULT_PRIVATE_KEY", settings.vault_private_key.hex())
+    monkeypatch.setenv("DECA_ALLOW_TEST_NETS", "1")
     monkeypatch.setenv("DECA_POLICY_DIR", str(settings.policy_dir))
     for n in ("ALIBABA_CLOUD_ACCESS_KEY_ID", "DECA_ENV"):
         monkeypatch.delenv(n, raising=False)
@@ -26,7 +26,7 @@ def env(monkeypatch, settings):
 def principals(conn):
     toks = {}
     with conn.transaction():
-        for name, kind, role in [("tracecat", "service", "analyst"), ("svc-admin", "service", "admin"),
+        for name, kind, role in [("worker-svc", "service", "analyst"), ("svc-admin", "service", "admin"),
                                  ("viewer1", "human", "viewer"), ("analyst1", "human", "analyst"),
                                  ("approver1", "human", "approver"), ("admin1", "human", "admin")]:
             t = secrets.token_urlsafe(24)
@@ -68,18 +68,18 @@ def test_auth_required(client):
 
 def test_valid_l1_request_is_validated_in_shadow(client, principals, waf, conn):
     aid, ip_tok = waf
-    r = client.post("/v1/actions/requests", headers=principals["tracecat"],
+    r = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                     json=body(aid, params={"ip_token": ip_tok, "waf_instance": "waf-prod-1"}))
     assert r.status_code == 201, r.text
     j = r.json()
     assert j["status"] == "validated" and j["mode"] == "shadow" and j["executed_at"] is None
     assert j["params"]["ttl_s"] == 86400 and ip_tok in j["would_execute"]
     assert "203.0.113.7" not in r.text
-    again = client.post("/v1/actions/requests", headers=principals["tracecat"],
+    again = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                         json=body(aid, params={"ip_token": ip_tok, "waf_instance": "waf-prod-1"}))
     assert again.status_code == 200 and again.json()["idempotent_replay"] is True
     assert again.json()["request_id"] == j["request_id"]
-    clash = client.post("/v1/actions/requests", headers=principals["tracecat"],
+    clash = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                         json=body(aid, params={"ip_token": ip_tok, "waf_instance": "waf-prod-2"},
                                   idempotency_key=j["idempotency_key"]))
     assert clash.status_code == 409
@@ -93,7 +93,7 @@ def test_valid_l1_request_is_validated_in_shadow(client, principals, waf, conn):
 def test_protected_target_rejected(client, principals, pool, settings, tmp_path, conn, ip, reason):
     ingest(pool, settings, tmp_path, [waf_alert(ip=ip)])
     aid, alert = _alert(conn)
-    r = client.post("/v1/actions/requests", headers=principals["tracecat"],
+    r = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                     json=body(aid, params={"ip_token": alert["entities"]["src_ip"], "waf_instance": "w1"}))
     j = r.json()
     assert j["status"] == "rejected" and any(reason in x for x in j["reasons"])
@@ -104,7 +104,7 @@ def test_target_must_come_from_evidence(client, principals, waf, settings):
     aid, _ = waf
     from deca_soar.common.pii import Tokenizer
     forged = Tokenizer(settings.tokenization_key).token("ip", "203.0.113.200")
-    j = client.post("/v1/actions/requests", headers=principals["tracecat"],
+    j = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                     json=body(aid, params={"ip_token": forged, "waf_instance": "w1"})).json()
     assert j["status"] == "rejected" and "target not in alert evidence" in j["reasons"]
 
@@ -126,7 +126,7 @@ def test_validation_rejections(client, principals, waf, kw, reason):
         kw["params"] = {k: (ip_tok if v == "IPTOK" else v) for k, v in kw["params"].items()}
     else:
         kw.setdefault("params", {"ip_token": ip_tok, "waf_instance": "w1"})
-    j = client.post("/v1/actions/requests", headers=principals["tracecat"], json=body(aid, **kw)).json()
+    j = client.post("/v1/actions/requests", headers=principals["worker-svc"], json=body(aid, **kw)).json()
     assert j["status"] == "rejected", j
     assert any(reason in x for x in j["reasons"]), j["reasons"]
 
@@ -137,7 +137,7 @@ def test_rate_limit(client, principals, pool, settings, tmp_path, conn):
     rows = conn.execute("SELECT alert_id, alert FROM gateway.inbox_event").fetchall()
     statuses = []
     for r in rows:
-        j = client.post("/v1/actions/requests", headers=principals["tracecat"],
+        j = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                         json=body(str(r["alert_id"]), params={"ip_token": r["alert"]["entities"]["src_ip"],
                                                                "waf_instance": "w1"})).json()
         statuses.append(j["status"])
@@ -155,7 +155,7 @@ def test_l2_approval_flow(client, principals, pool, settings, tmp_path, conn):
     j = r.json()
     assert j["status"] == "pending_approval" and j["level"] == "L2", j
     url = f"/v1/actions/requests/{j['request_id']}/approval"
-    assert client.post(url, headers=principals["tracecat"], json={"approve": True}).status_code == 403
+    assert client.post(url, headers=principals["worker-svc"], json={"approve": True}).status_code == 403
     assert client.post(url, headers=principals["svc-admin"], json={"approve": True}).status_code == 403
     assert client.post(url, headers=principals["viewer1"], json={"approve": True}).status_code == 403
     r2 = client.post(url, headers=principals["approver1"], json={"approve": True})
@@ -182,24 +182,24 @@ def test_role_permissions(client, principals, waf):
     req = body(aid, params={"ip_token": ip_tok, "waf_instance": "w1"})
     assert client.post("/v1/actions/requests", headers=principals["viewer1"], json=req).status_code == 403
     ks = {"scope": "global", "engaged": True}
-    for who in ("viewer1", "analyst1", "approver1", "tracecat", "svc-admin"):
+    for who in ("viewer1", "analyst1", "approver1", "worker-svc", "svc-admin"):
         assert client.post("/v1/kill-switch", headers=principals[who], json=ks).status_code == 403, who
     assert client.post("/v1/kill-switch", headers=principals["admin1"], json=ks).status_code == 200
-    j = client.post("/v1/actions/requests", headers=principals["tracecat"], json=req).json()
-    assert j["mode"] == "shadow"
-    assert client.get("/v1/whoami", headers=principals["tracecat"]).json()["permissions"] == ["read",
+    j = client.post("/v1/actions/requests", headers=principals["worker-svc"], json=req).json()
+    assert j["mode"] == "shadow" and j["status"] == "rejected" and "kill switch engaged" in j["reasons"]
+    assert client.get("/v1/whoami", headers=principals["worker-svc"]).json()["permissions"] == ["read",
                                                                                               "request_action"]
 
 
 def test_unknown_alert_and_bad_body(client, principals):
-    r = client.post("/v1/actions/requests", headers=principals["tracecat"],
+    r = client.post("/v1/actions/requests", headers=principals["worker-svc"],
                     json=body("00000000-0000-0000-0000-000000000000"))
     assert r.status_code == 404
     bad = body("00000000-0000-0000-0000-000000000000")
     bad["decision"]["confidence"] = 7
-    assert client.post("/v1/actions/requests", headers=principals["tracecat"], json=bad).status_code == 422
+    assert client.post("/v1/actions/requests", headers=principals["worker-svc"], json=bad).status_code == 422
     bad = body("00000000-0000-0000-0000-000000000000", sneaky=True)
-    assert client.post("/v1/actions/requests", headers=principals["tracecat"], json=bad).status_code == 422
+    assert client.post("/v1/actions/requests", headers=principals["worker-svc"], json=bad).status_code == 422
 
 
 def test_refuses_to_start_with_write_credentials(env, principals):
@@ -219,7 +219,7 @@ def test_refuses_production_with_placeholder_allowlist(env, principals):
 
 
 def test_token_stored_hashed(conn, principals):
-    tok = principals["tracecat"]["Authorization"].split()[1]
+    tok = principals["worker-svc"]["Authorization"].split()[1]
     assert conn.execute("SELECT count(*) n FROM broker.principal WHERE token_sha256 = %s",
                         (hashlib.sha256(tok.encode()).hexdigest(),)).fetchone()["n"] == 1
     assert ledger.verify(conn).ok

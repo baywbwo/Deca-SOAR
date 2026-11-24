@@ -71,27 +71,51 @@ FORBIDDEN_WRITE_CREDENTIAL_ENV = (
 )
 
 
+# Old symmetric vault key (gateway could decrypt everything) and the broker's private key:
+# neither may ever be present in the gateway's environment (review F5).
+GATEWAY_FORBIDDEN_ENV = ("DECA_VAULT_KEY", "DECA_VAULT_PRIVATE_KEY")
+
+
+def _present(name: str) -> bool:
+    return bool(os.environ.get(name) or os.environ.get(f"{name}_FILE"))
+
+
 @dataclass(frozen=True)
 class Settings:
     db_url: str
-    tokenization_key: bytes
-    vault_key: bytes
-    vault_key_id: str = "v1"
+    tokenization_key: bytes | None = None
+    vault_public_key: bytes | None = None
+    vault_private_key: bytes | None = None
+    vault_key_id: str = "v2"
     internal_cidrs: list = field(default_factory=lambda: _cidrs(DEFAULT_INTERNAL_CIDRS))
     policy_dir: Path = Path("policy")
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def _common(cls) -> dict:
         db_url = read_secret("DECA_DB_URL")
         assert db_url is not None
+        return {
+            "db_url": db_url,
+            "vault_key_id": os.environ.get("DECA_VAULT_KEY_ID", "v2"),
+            "internal_cidrs": _cidrs(os.environ.get("DECA_INTERNAL_CIDRS", DEFAULT_INTERNAL_CIDRS)),
+            "policy_dir": Path(os.environ.get("DECA_POLICY_DIR", "policy")),
+        }
+
+    @classmethod
+    def for_gateway(cls) -> "Settings":
+        """Tokenisation key + vault public key only: the gateway can seal PII but never open it."""
+        bad = [n for n in GATEWAY_FORBIDDEN_ENV if _present(n)]
+        if bad:
+            raise ConfigError("gateway must not hold a vault decryption key (found: " + ", ".join(bad) + ")")
         return cls(
-            db_url=db_url,
+            **cls._common(),
             tokenization_key=read_key32("DECA_TOKENIZATION_KEY"),
-            vault_key=read_key32("DECA_VAULT_KEY"),
-            vault_key_id=os.environ.get("DECA_VAULT_KEY_ID", "v1"),
-            internal_cidrs=_cidrs(os.environ.get("DECA_INTERNAL_CIDRS", DEFAULT_INTERNAL_CIDRS)),
-            policy_dir=Path(os.environ.get("DECA_POLICY_DIR", "policy")),
+            vault_public_key=read_key32("DECA_VAULT_PUBLIC_KEY"),
         )
+
+    @classmethod
+    def for_broker(cls) -> "Settings":
+        return cls(**cls._common(), vault_private_key=read_key32("DECA_VAULT_PRIVATE_KEY"))
 
 
 def assert_no_write_credentials() -> None:

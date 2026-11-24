@@ -52,7 +52,7 @@ def run_loop(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = Settings.from_env()
+    settings = Settings.for_gateway()
     pool = make_pool(settings.db_url)
     webhook_url = read_secret("DECA_TRACECAT_WEBHOOK_URL")
     # Tracecat webhook API key (x-tracecat-api-key); production sets it, the URL secret alone is weaker.

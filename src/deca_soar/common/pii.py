@@ -2,8 +2,9 @@
 
 Tokens are deterministic, `tok_<kind>_<16 hex>` = HMAC-SHA256(tokenization_key, kind|value),
 so the same IP gets the same token across alerts (dedup and correlation keep working)
-without the value being recoverable from the token. The real value is stored in the vault
-encrypted with AES-256-GCM, with the token as associated data.
+without the value being recoverable from the token. The real value is stored in the vault as a
+sealed box to the broker's X25519 public key (ephemeral ECDH + HKDF-SHA256 + AES-256-GCM, token as
+associated data), so the gateway can write entries but cannot open any of them.
 """
 
 from __future__ import annotations
@@ -17,7 +18,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import psycopg
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 TOKEN_RE = re.compile(r"\btok_[a-z]+_[0-9a-f]{16}\b")
 
@@ -32,6 +37,18 @@ _SECRET_PARAM = (
 _BEARER = r"(?i)(?P<k>\b(?:bearer|basic)\s+)(?P<v>[A-Za-z0-9._~+/=-]{8,})"
 _ALIBABA_AK = r"\bLTAI[0-9A-Za-z]{12,30}\b"
 _DIGITS = r"(?<![\d])\d{10,19}(?![\d])"
+
+
+def canonical_ip(value) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Parse an IP and unwrap IPv4-mapped IPv6 (`::ffff:a.b.c.d` -> `a.b.c.d`).
+
+    Every tokenisation and policy check goes through here, so one address has one token and
+    one answer from the protected list / internal CIDR checks whatever form the log used.
+    """
+    ip = ipaddress.ip_address(value)
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
 
 
 def _luhn_ok(digits: str) -> bool:
@@ -64,7 +81,7 @@ class Tokenizer:
 
     def token_ip(self, value: str) -> str:
         """Tokenise an IP unless it belongs to DECA's internal ranges (those are not customer data)."""
-        ip = ipaddress.ip_address(value)
+        ip = canonical_ip(value)
         if self.is_internal_ip(ip):
             return str(ip)
         return self.token("ip", str(ip))
@@ -130,26 +147,61 @@ def tokens_in(values: Iterable[str]) -> list[str]:
     return sorted(set(out))
 
 
-class Vault:
-    """Encrypted token -> value map. Only the gateway (writes) and broker (reads) hold the key."""
+VAULT_INFO = b"deca-soar/vault/x25519-hkdf-sha256-aes256gcm/v2"
 
-    def __init__(self, key: bytes, key_id: str = "v1") -> None:
-        self._aead = AESGCM(key)
+
+def _vault_key(shared: bytes, epk: bytes, recipient: bytes) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=epk + recipient, info=VAULT_INFO).derive(shared)
+
+
+def _raw(pub: X25519PublicKey) -> bytes:
+    return pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+def vault_public_key(private_key: bytes) -> bytes:
+    return _raw(X25519PrivateKey.from_private_bytes(private_key).public_key())
+
+
+class VaultWriter:
+    """Seals values to the broker's public key. Holds no secret: what it writes it cannot read back."""
+
+    def __init__(self, public_key: bytes, key_id: str = "v2") -> None:
+        self._recipient = X25519PublicKey.from_public_bytes(public_key)
         self.key_id = key_id
+
+    def seal(self, token: str, value: str) -> tuple[bytes, bytes]:
+        eph = X25519PrivateKey.generate()
+        epk = _raw(eph.public_key())
+        key = _vault_key(eph.exchange(self._recipient), epk, _raw(self._recipient))
+        nonce = os.urandom(12)
+        return nonce, epk + AESGCM(key).encrypt(nonce, value.encode(), token.encode())
 
     def store(self, conn: psycopg.Connection, found: dict[str, tuple[str, str]]) -> None:
         for tok, (kind, value) in found.items():
-            nonce = os.urandom(12)
-            ct = self._aead.encrypt(nonce, value.encode(), tok.encode())
+            nonce, ct = self.seal(tok, value)
             conn.execute(
                 "INSERT INTO vault.token_map (token, kind, key_id, nonce, ciphertext)"
                 " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (token) DO NOTHING",
                 (tok, kind, self.key_id, nonce, ct),
             )
 
+
+class Vault(VaultWriter):
+    """Broker side: holds the X25519 private key and can reveal tokens."""
+
+    def __init__(self, private_key: bytes, key_id: str = "v2") -> None:
+        self._sk = X25519PrivateKey.from_private_bytes(private_key)
+        super().__init__(_raw(self._sk.public_key()), key_id)
+
+    def open(self, token: str, nonce: bytes, sealed: bytes) -> str:
+        epk, ct = sealed[:32], sealed[32:]
+        shared = self._sk.exchange(X25519PublicKey.from_public_bytes(epk))
+        key = _vault_key(shared, epk, _raw(self._recipient))
+        return AESGCM(key).decrypt(nonce, ct, token.encode()).decode()
+
     def reveal(self, conn: psycopg.Connection, token: str) -> str | None:
         row = conn.execute("SELECT nonce, ciphertext FROM vault.token_map WHERE token = %s", (token,)).fetchone()
         if row is None:
             return None
         nonce, ct = (row["nonce"], row["ciphertext"]) if isinstance(row, dict) else row
-        return self._aead.decrypt(bytes(nonce), bytes(ct), token.encode()).decode()
+        return self.open(token, bytes(nonce), bytes(ct))

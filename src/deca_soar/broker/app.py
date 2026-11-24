@@ -17,6 +17,7 @@ from deca_soar.broker import roles, service
 from deca_soar.broker.roles import Principal
 from deca_soar.common.config import ConfigError, Settings, assert_no_write_credentials
 from deca_soar.common.db import make_pool
+from deca_soar.common.http import DEFAULT_MAX_BODY, BodyLimit
 from deca_soar.common.pii import Vault
 
 log = logging.getLogger("deca_soar.broker")
@@ -58,15 +59,20 @@ class KillSwitchIn(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     assert_no_write_credentials()
-    settings = Settings.from_env()
+    settings = Settings.for_broker()
     cat, protected = catalog_mod.load(settings.policy_dir)
-    if os.environ.get("DECA_ENV") == "production" and protected.has_placeholders:
+    production = os.environ.get("DECA_ENV") == "production"
+    if production and protected.has_placeholders:
         raise ConfigError("protected.yaml still has placeholder entries; refusing to start in production")
+    allow_test_nets = os.environ.get("DECA_ALLOW_TEST_NETS") == "1"
+    if production and allow_test_nets:
+        raise ConfigError("DECA_ALLOW_TEST_NETS is for tests only; refusing to start in production")
     app.state.broker = service.Broker(
         catalog=cat,
         protected=protected,
-        vault=Vault(settings.vault_key, settings.vault_key_id),
+        vault=Vault(settings.vault_private_key, settings.vault_key_id),
         internal_cidrs=settings.internal_cidrs,
+        allow_test_nets=allow_test_nets,
     )
     app.state.pool = make_pool(settings.db_url)
     log.info("broker ready: %d actions, mode=shadow", len(cat))
@@ -75,6 +81,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="DECA SOAR Action Broker", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(BodyLimit, max_bytes=int(os.environ.get("DECA_MAX_BODY_BYTES", DEFAULT_MAX_BODY)))
 
 
 def current_principal(request: Request) -> Principal:

@@ -94,7 +94,9 @@ def normalize(raw: dict, tok: Tokenizer, *, source_name: str) -> NormalizedAlert
         "raw_ref": _clip(raw.get("raw_ref"), 512) or f"replay://{source_name}",
         "untrusted_fields": {"uri": uri, "ua": ua},
     }
-    evidence = tokens_in([src_ip or "", principal or "", ak_token or "", uri or ""])
+    # Targets may only come from structured source fields. Tokens inside the URI/UA are attacker
+    # text and stay context only, so "/login?next=8.8.8.8" cannot make 8.8.8.8 blockable (review F1).
+    evidence = tokens_in([src_ip or "", principal or "", ak_token or ""])
     return NormalizedAlert(
         alert_id=alert["alert_id"],
         fingerprint=fingerprint,

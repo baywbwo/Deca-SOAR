@@ -13,6 +13,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from deca_soar import ledger
+from deca_soar.ledger.anchor import SinkError, open_sink
 from deca_soar.broker import service
 from deca_soar.broker.roles import ROLES
 from deca_soar.common.config import read_secret
@@ -46,12 +47,37 @@ def cmd_create_principal(a: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_verify_ledger(_: argparse.Namespace) -> int:
+def cmd_verify_ledger(a: argparse.Namespace) -> int:
+    try:
+        anchors = open_sink(a.anchors).read() if a.anchors else []
+    except SinkError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     with psycopg.connect(_db_url(), row_factory=dict_row) as conn:
         r = ledger.verify(conn)
-    print(json.dumps({"ok": r.ok, "entries": r.entries, "head_seq": r.head_seq, "head_hash": r.head_hash,
-                      "errors": r.errors}))
-    return 0 if r.ok else 1
+        anchor_errors = ledger.check_anchors(conn, anchors)
+    ok = r.ok and not anchor_errors
+    print(json.dumps({"ok": ok, "entries": r.entries, "head_seq": r.head_seq, "head_hash": r.head_hash,
+                      "anchors_checked": len(anchors), "errors": r.errors + anchor_errors}))
+    return 0 if ok else 1
+
+
+def cmd_anchor_ledger(a: argparse.Namespace) -> int:
+    """Daily job: verify the chain, then append its head to an external sink (review F3)."""
+    try:
+        sink = open_sink(a.sink)
+        with psycopg.connect(_db_url(), row_factory=dict_row) as conn:
+            r, rec = ledger.anchor_record(conn)
+            anchor_errors = ledger.check_anchors(conn, sink.read())
+        if not r.ok or anchor_errors:
+            print(json.dumps({"ok": False, "anchored": False, "errors": r.errors + anchor_errors}))
+            return 1
+        sink.append(rec)
+    except SinkError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(json.dumps({"ok": True, "anchored": True, **rec}))
+    return 0
 
 
 def cmd_kill_switch(a: argparse.Namespace) -> int:
@@ -78,7 +104,12 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--role", choices=ROLES, required=True)
     cp.add_argument("--token-file", required=True, help="new 0600 file that receives the bearer token")
     cp.set_defaults(fn=cmd_create_principal)
-    sub.add_parser("verify-ledger").set_defaults(fn=cmd_verify_ledger)
+    vl = sub.add_parser("verify-ledger")
+    vl.add_argument("--anchors", help="also compare with anchors from this sink (file:<path>)")
+    vl.set_defaults(fn=cmd_verify_ledger)
+    al = sub.add_parser("anchor-ledger")
+    al.add_argument("--sink", required=True, help="file:<path> (phase 0) or sls:<project>/<logstore> (untested)")
+    al.set_defaults(fn=cmd_anchor_ledger)
     ks = sub.add_parser("kill-switch")
     ks.add_argument("state", choices=("on", "off"))
     ks.add_argument("--scope", default="global")

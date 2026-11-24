@@ -109,3 +109,35 @@ def verify(conn: psycopg.Connection, *, max_errors: int = 20) -> VerifyResult:
 
 def _col(row: Any, name: str, idx: int) -> Any:
     return row[name] if isinstance(row, dict) else row[idx]
+
+
+def anchor_record(conn: psycopg.Connection) -> tuple[VerifyResult, dict]:
+    """Verify the chain and describe its head for an external anchor (design 6.5, review F3).
+
+    An anchor kept outside the database the apps write to is what makes an owner-level rewrite
+    detectable: recomputing the chain after an edit changes every later hash, including the head.
+    """
+    r = verify(conn)
+    rec = {
+        "v": 1,
+        "head_seq": r.head_seq,
+        "head_hash": r.head_hash,
+        "entries": r.entries,
+        "anchored_at": datetime.now(UTC).isoformat(),
+    }
+    return r, rec
+
+
+def check_anchors(conn: psycopg.Connection, anchors: list[dict]) -> list[str]:
+    """Every anchored head must still be in the ledger with the same hash."""
+    errors: list[str] = []
+    for a in anchors:
+        seq = a.get("head_seq")
+        if seq is None:
+            continue
+        row = conn.execute("SELECT hash FROM ledger.entry WHERE seq = %s", (seq,)).fetchone()
+        if row is None:
+            errors.append(f"anchor seq {seq}: entry missing (ledger truncated?)")
+        elif _col(row, "hash", 0) != a.get("head_hash"):
+            errors.append(f"anchor seq {seq}: hash differs from anchored head (ledger rewritten?)")
+    return errors

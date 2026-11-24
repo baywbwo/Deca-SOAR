@@ -11,7 +11,7 @@ from psycopg_pool import ConnectionPool
 
 from deca_soar import ledger
 from deca_soar.common.config import Settings
-from deca_soar.common.pii import Tokenizer, Vault
+from deca_soar.common.pii import Tokenizer, VaultWriter
 from deca_soar.gateway.normalize import NormalizeError, normalize
 from deca_soar.gateway.sources import AlertSource
 
@@ -31,7 +31,7 @@ class PullResult:
 def pull_once(pool: ConnectionPool, source: AlertSource, settings: Settings, *, limit: int = 500) -> PullResult:
     """One pull cycle. Inbox rows, vault entries, ledger entries and the cursor commit together,
     so a crash either keeps the whole batch or none of it (no event lost, none double-counted)."""
-    vault = Vault(settings.vault_key, settings.vault_key_id)
+    vault = VaultWriter(settings.vault_public_key, settings.vault_key_id)
     res = PullResult()
     with pool.connection() as conn, conn.transaction():
         row = conn.execute(
