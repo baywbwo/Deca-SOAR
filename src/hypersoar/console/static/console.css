@@ -516,7 +516,7 @@ td.mono { white-space: nowrap; }
   .tabs { margin: 0 -16px; padding: 0 4px; scrollbar-width: none; }
   .mode { height: auto; flex-wrap: wrap; padding: 8px 16px; gap: 8px; }
   .mode .mtx, .mode .sep { display: none; }
-  .mode .entity { display: inline; }
+  .mode .entity { display: inline-flex; }
   .mapcard .drawer { width: auto; left: 0; }
   body.app { padding-bottom: 96px; }
 }
