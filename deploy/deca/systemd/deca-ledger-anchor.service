@@ -1,0 +1,11 @@
+[Unit]
+Description=DECA SOAR: anchor the audit ledger head (append-only anchor file)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/deca-soar
+# Exit 1 = chain broken or an earlier anchor no longer matches: page the security engineer.
+ExecStart=/usr/bin/docker compose -f deploy/deca/docker-compose.yml --env-file /etc/deca-soar/deca.env \
+  --profile jobs run --rm ledger-anchor

@@ -1,11 +1,11 @@
-"""Ingest gateway: pull -> normalise/tokenise -> dedup into a durable inbox -> forward to Tracecat."""
+"""Ingest gateway: pull -> normalise/tokenise -> dedup into a durable inbox -> start the alert workflow."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-import httpx
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
@@ -99,10 +99,16 @@ def _backoff(attempts: int) -> timedelta:
     return timedelta(seconds=min(300, 2 ** min(attempts, 8)))
 
 
-def forward_once(
-    pool: ConnectionPool, client: httpx.Client, webhook_url: str, *, batch: int = 50, api_key: str | None = None
-) -> ForwardResult:
-    """Deliver pending alerts to the Tracecat webhook. At-least-once; Tracecat sees alert_id for dedup."""
+class DeliveryError(Exception):
+    """A failed hand-off. The message is stored in the inbox, so it must not carry secrets."""
+
+
+Deliver = Callable[[dict], "str | None"]
+
+
+def forward_once(pool: ConnectionPool, deliver: Deliver, *, batch: int = 50) -> ForwardResult:
+    """Hand pending alerts to the workflow engine. At-least-once; the workflow id derives from alert_id,
+    so a redelivery after a crash attaches to the same workflow instead of starting a second one."""
     res = ForwardResult()
     with pool.connection() as conn:
         with conn.transaction():
@@ -116,27 +122,10 @@ def forward_once(
                 body = dict(r["alert"])
                 body["counts"] = {**body.get("counts", {}), "events": r["event_count"]}
                 try:
-                    headers = {"x-tracecat-api-key": api_key} if api_key else None
-                    resp = client.post(webhook_url, json=body, headers=headers)
-                    resp.raise_for_status()
-                    ref = _downstream_ref(resp)
-                    conn.execute(
-                        "UPDATE gateway.inbox_event SET status = 'forwarded', forwarded_at = now(),"
-                        " attempts = attempts + 1, downstream_ref = %s, last_error = NULL WHERE alert_id = %s",
-                        (ref, r["alert_id"]),
-                    )
-                    ledger.append(
-                        conn, "alert.forwarded", ACTOR, {"alert_id": str(r["alert_id"]), "downstream_ref": ref}
-                    )
-                    res.sent += 1
-                except httpx.HTTPError as e:
+                    ref = deliver(body)
+                except Exception as e:  # noqa: BLE001 - any failure means "retry later"
                     attempts = r["attempts"] + 1
-                    # Status code or exception class only: the URL carries the webhook secret.
-                    err = (
-                        f"http {e.response.status_code}"
-                        if isinstance(e, httpx.HTTPStatusError)
-                        else type(e).__name__
-                    )
+                    err = str(e)[:200] if isinstance(e, DeliveryError) else type(e).__name__
                     dead = attempts >= MAX_ATTEMPTS
                     conn.execute(
                         "UPDATE gateway.inbox_event SET attempts = %s, last_error = %s,"
@@ -149,16 +138,13 @@ def forward_once(
                         ledger.append(conn, "alert.dead_letter", ACTOR, {"alert_id": str(r["alert_id"]), "error": err})
                     else:
                         res.failed += 1
+                    continue
+                ref = str(ref)[:200] if ref else None
+                conn.execute(
+                    "UPDATE gateway.inbox_event SET status = 'forwarded', forwarded_at = now(),"
+                    " attempts = attempts + 1, downstream_ref = %s, last_error = NULL WHERE alert_id = %s",
+                    (ref, r["alert_id"]),
+                )
+                ledger.append(conn, "alert.forwarded", ACTOR, {"alert_id": str(r["alert_id"]), "downstream_ref": ref})
+                res.sent += 1
     return res
-
-
-def _downstream_ref(resp: httpx.Response) -> str | None:
-    try:
-        data = resp.json()
-    except ValueError:
-        return None
-    if isinstance(data, dict):
-        for k in ("wf_exec_id", "workflow_execution_id", "id"):
-            if data.get(k):
-                return str(data[k])[:200]
-    return None

@@ -1,0 +1,158 @@
+# enable-template
+# Temporal server 1.32.2 (MIT, self-hosted) for DECA SOAR. Rendered by the server from the environment;
+# check a rendering with `temporal-server -c <config dir> -e deca-production render-config` (preflight does).
+# Single node, PostgreSQL on RDS over verified TLS, mTLS on frontend and internode, archival off,
+# no Temporal Cloud. Required env is listed in deploy/temporal/temporal.env.example.
+{{- range $k := list "POSTGRES_SEEDS" "POSTGRES_USER" "POSTGRES_PWD" "BIND_ON_IP" "TEMPORAL_TLS_SERVER_CERT" "TEMPORAL_TLS_SERVER_KEY" "TEMPORAL_TLS_CA_CERT" "TEMPORAL_TLS_SERVER_NAME" "TEMPORAL_TLS_CLIENT_CA_CERT" "TEMPORAL_TLS_SYSTEM_WORKER_CERT" "TEMPORAL_TLS_SYSTEM_WORKER_KEY" }}
+{{- if not (env $k) }}{{ fail (print $k " is required") }}{{ end }}
+{{- end }}
+{{- if has (env "BIND_ON_IP") (list "0.0.0.0" "::" "[::]") }}{{ fail "BIND_ON_IP must be this host's private IP, not a wildcard" }}{{ end }}
+log:
+    stdout: true
+    level: {{ default "info" (env "LOG_LEVEL") }}
+
+persistence:
+    numHistoryShards: {{ default "64" (env "NUM_HISTORY_SHARDS") }}
+    defaultStore: default
+    visibilityStore: visibility
+    datastores:
+        default:
+            sql:
+                pluginName: postgres12_pgx
+                databaseName: {{ default "temporal" (env "DBNAME") | quote }}
+                connectAddr: "{{ env "POSTGRES_SEEDS" }}:{{ default "5432" (env "DB_PORT") }}"
+                connectProtocol: tcp
+                user: {{ env "POSTGRES_USER" | quote }}
+                password: {{ env "POSTGRES_PWD" | quote }}
+                maxConns: {{ default "20" (env "SQL_MAX_CONNS") }}
+                maxIdleConns: {{ default "20" (env "SQL_MAX_IDLE_CONNS") }}
+                maxConnLifetime: 1h
+                tls:
+                    enabled: {{ default "true" (env "SQL_TLS_ENABLED") }}
+                    caFile: {{ env "SQL_CA" | quote }}
+                    enableHostVerification: {{ default "true" (env "SQL_HOST_VERIFICATION") }}
+                    serverName: {{ env "SQL_HOST_NAME" | quote }}
+        visibility:
+            sql:
+                pluginName: postgres12_pgx
+                databaseName: {{ default "temporal_visibility" (env "VISIBILITY_DBNAME") | quote }}
+                connectAddr: "{{ env "POSTGRES_SEEDS" }}:{{ default "5432" (env "DB_PORT") }}"
+                connectProtocol: tcp
+                user: {{ env "POSTGRES_USER" | quote }}
+                password: {{ env "POSTGRES_PWD" | quote }}
+                maxConns: {{ default "10" (env "SQL_VIS_MAX_CONNS") }}
+                maxIdleConns: {{ default "10" (env "SQL_VIS_MAX_CONNS") }}
+                maxConnLifetime: 1h
+                tls:
+                    enabled: {{ default "true" (env "SQL_TLS_ENABLED") }}
+                    caFile: {{ env "SQL_CA" | quote }}
+                    enableHostVerification: {{ default "true" (env "SQL_HOST_VERIFICATION") }}
+                    serverName: {{ env "SQL_HOST_NAME" | quote }}
+
+global:
+    membership:
+        maxJoinDuration: 30s
+        broadcastAddress: {{ env "BIND_ON_IP" | quote }}
+    pprof:
+        port: 0
+    tls:
+        refreshInterval: 1h
+        expirationChecks:
+            warningWindow: 720h
+            errorWindow: 168h
+            checkInterval: 24h
+        internode:
+            server:
+                requireClientAuth: true
+                certFile: {{ env "TEMPORAL_TLS_SERVER_CERT" | quote }}
+                keyFile: {{ env "TEMPORAL_TLS_SERVER_KEY" | quote }}
+                clientCaFiles:
+                    - {{ env "TEMPORAL_TLS_CA_CERT" | quote }}
+            client:
+                serverName: {{ env "TEMPORAL_TLS_SERVER_NAME" | quote }}
+                rootCaFiles:
+                    - {{ env "TEMPORAL_TLS_CA_CERT" | quote }}
+        frontend:
+            server:
+                # Only certs signed by the DECA client CA (gateway, worker, operators) get in.
+                requireClientAuth: true
+                certFile: {{ env "TEMPORAL_TLS_SERVER_CERT" | quote }}
+                keyFile: {{ env "TEMPORAL_TLS_SERVER_KEY" | quote }}
+                clientCaFiles:
+                    - {{ env "TEMPORAL_TLS_CLIENT_CA_CERT" | quote }}
+            client:
+                serverName: {{ env "TEMPORAL_TLS_SERVER_NAME" | quote }}
+                rootCaFiles:
+                    - {{ env "TEMPORAL_TLS_CA_CERT" | quote }}
+        # Temporal's own system worker calls the frontend like any client, so it needs a cert from the
+        # DECA client CA too (the frontend accepts nothing else).
+        systemWorker:
+            certFile: {{ env "TEMPORAL_TLS_SYSTEM_WORKER_CERT" | quote }}
+            keyFile: {{ env "TEMPORAL_TLS_SYSTEM_WORKER_KEY" | quote }}
+            client:
+                serverName: {{ env "TEMPORAL_TLS_SERVER_NAME" | quote }}
+                rootCaFiles:
+                    - {{ env "TEMPORAL_TLS_CA_CERT" | quote }}
+    {{- with env "PROMETHEUS_ENDPOINT" }}
+    metrics:
+        prometheus:
+            timerType: histogram
+            listenAddress: {{ . | quote }}
+    {{- end }}
+
+services:
+    frontend:
+        rpc:
+            grpcPort: {{ default "7233" (env "FRONTEND_GRPC_PORT") }}
+            membershipPort: 6933
+            bindOnIP: {{ env "BIND_ON_IP" | quote }}
+            httpPort: {{ default "7243" (env "FRONTEND_HTTP_PORT") }}
+    matching:
+        rpc:
+            grpcPort: 7235
+            membershipPort: 6935
+            bindOnIP: {{ env "BIND_ON_IP" | quote }}
+    history:
+        rpc:
+            grpcPort: 7234
+            membershipPort: 6934
+            bindOnIP: {{ env "BIND_ON_IP" | quote }}
+    worker:
+        rpc:
+            grpcPort: 7239
+            membershipPort: 6939
+            bindOnIP: {{ env "BIND_ON_IP" | quote }}
+
+clusterMetadata:
+    enableGlobalNamespace: false
+    failoverVersionIncrement: 10
+    masterClusterName: active
+    currentClusterName: active
+    clusterInformation:
+        active:
+            enabled: true
+            initialFailoverVersion: 1
+            rpcName: frontend
+            rpcAddress: "{{ env "BIND_ON_IP" }}:{{ default "7233" (env "FRONTEND_GRPC_PORT") }}"
+            httpAddress: "{{ env "BIND_ON_IP" }}:{{ default "7243" (env "FRONTEND_HTTP_PORT") }}"
+
+dcRedirectionPolicy:
+    policy: noop
+
+# Archival writes workflow histories to disk/blob storage; off for DECA (payloads are encrypted anyway,
+# and retention is set per namespace).
+archival:
+    history:
+        state: disabled
+    visibility:
+        state: disabled
+namespaceDefaults:
+    archival:
+        history:
+            state: disabled
+        visibility:
+            state: disabled
+
+dynamicConfigClient:
+    filepath: {{ default "/etc/deca-soar/temporal/dynamicconfig/production.yaml" (env "DYNAMIC_CONFIG_FILE_PATH") | quote }}
+    pollInterval: 60s

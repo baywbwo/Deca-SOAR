@@ -1,0 +1,10 @@
+[Unit]
+Description=DECA SOAR: daily ledger anchor
+
+[Timer]
+OnCalendar=*-*-* 00:15:00 Asia/Jakarta
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

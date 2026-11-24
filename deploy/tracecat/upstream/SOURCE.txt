@@ -1,2 +1,0 @@
-Copied unmodified from github.com/TracecatHQ/tracecat tag 1.5.2 (commit 66a9c7f), AGPL-3.0.
-Input for scripts/render_tracecat_compose.py; do not edit by hand.

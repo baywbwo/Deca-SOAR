@@ -1,7 +1,5 @@
-import httpx
-
 from deca_soar import ledger
-from deca_soar.gateway.service import MAX_ATTEMPTS, forward_once
+from deca_soar.gateway.service import MAX_ATTEMPTS, DeliveryError, forward_once
 
 from helpers import ingest, waf_alert, write_ndjson
 
@@ -26,30 +24,41 @@ def test_forward_success_and_retry_then_dead(pool, settings, tmp_path, conn):
     ingest(pool, settings, tmp_path, [waf_alert(), waf_alert(ip="203.0.113.50")])
     seen = []
 
-    def ok(req: httpx.Request):
-        seen.append(req)
-        return httpx.Response(200, json={"wf_exec_id": "wf-1/exec-1"})
+    def ok(alert):
+        seen.append(alert)
+        return f"alert-{alert['alert_id']}/run-1"
 
-    with httpx.Client(transport=httpx.MockTransport(ok)) as c:
-        res = forward_once(pool, c, "http://tracecat.invalid/webhook/secret-path")
+    res = forward_once(pool, ok)
     assert res.sent == 2 and len(seen) == 2
-    st = conn.execute("SELECT status, downstream_ref FROM gateway.inbox_event").fetchall()
-    assert {(s["status"], s["downstream_ref"]) for s in st} == {("forwarded", "wf-1/exec-1")}
+    assert all(a["counts"]["events"] == 40 and a["entities"]["src_ip"].startswith("tok_ip_") for a in seen)
+    st = conn.execute("SELECT status, downstream_ref, alert_id FROM gateway.inbox_event").fetchall()
+    assert {(s["status"], s["downstream_ref"]) for s in st} == {
+        ("forwarded", f"alert-{s['alert_id']}/run-1") for s in st
+    }
 
     ingest(pool, settings, tmp_path, [waf_alert(ip="203.0.113.60")], name="other")
 
-    def fail(req):
-        return httpx.Response(503)
+    def down(alert):
+        raise DeliveryError("temporal UNAVAILABLE")
 
-    with httpx.Client(transport=httpx.MockTransport(fail)) as c:
-        res = forward_once(pool, c, "http://tracecat.invalid/webhook/secret-path")
-        assert res.failed == 1
-        with conn.transaction():
-            conn.execute("UPDATE gateway.inbox_event SET attempts = %s, next_attempt_at = now()"
-                         " WHERE status = 'pending'", (MAX_ATTEMPTS - 1,))
-        res = forward_once(pool, c, "http://tracecat.invalid/webhook/secret-path")
+    res = forward_once(pool, down)
+    assert res.failed == 1
+    with conn.transaction():
+        conn.execute("UPDATE gateway.inbox_event SET attempts = %s, next_attempt_at = now()"
+                     " WHERE status = 'pending'", (MAX_ATTEMPTS - 1,))
+    res = forward_once(pool, down)
     assert res.dead == 1
     row = conn.execute("SELECT status, last_error FROM gateway.inbox_event WHERE status = 'dead'").fetchone()
-    assert row["last_error"] == "http 503"
-    assert "secret-path" not in str(conn.execute("SELECT json_agg(canonical) a FROM ledger.entry").fetchone())
+    assert row["last_error"] == "temporal UNAVAILABLE"
     assert ledger.verify(conn).ok
+
+
+def test_forward_unexpected_error_keeps_only_class_name(pool, settings, tmp_path, conn):
+    ingest(pool, settings, tmp_path, [waf_alert()])
+
+    def boom(alert):
+        raise RuntimeError("dial tcp temporal.internal:7233 secret-ish detail")
+
+    assert forward_once(pool, boom).failed == 1
+    row = conn.execute("SELECT status, last_error FROM gateway.inbox_event").fetchone()
+    assert (row["status"], row["last_error"]) == ("pending", "RuntimeError")

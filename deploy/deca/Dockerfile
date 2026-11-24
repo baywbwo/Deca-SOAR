@@ -1,4 +1,4 @@
-# DECA SOAR gateway + broker image (phase 0). Build from the repo root:
+# DECA SOAR image for gateway, Temporal worker, broker and jobs (phase 0). Build from the repo root:
 #   docker build -f deploy/deca/Dockerfile -t deca-soar:<git-sha> .
 FROM python:3.12-slim-bookworm@sha256:REPLACE_WITH_PINNED_DIGEST AS build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1

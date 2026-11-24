@@ -11,17 +11,16 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI
 
-from deca_soar.common.config import Settings, read_secret
+from deca_soar.common.config import Settings
 from deca_soar.common.db import make_pool
-from deca_soar.gateway.service import forward_once, pull_once
+from deca_soar.gateway.service import Deliver, forward_once, pull_once
 from deca_soar.gateway.sources import ReplayFileSource
+from deca_soar.gateway.starter import TemporalStarter
+from deca_soar.workflows.config import TemporalSettings
 
 log = logging.getLogger("deca_soar.gateway")
-# httpx logs request URLs at INFO; the Tracecat webhook URL embeds its secret.
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def build_source():
@@ -31,37 +30,30 @@ def build_source():
     raise RuntimeError(f"unsupported source {kind!r} (SLS source is phase 1)")
 
 
-def run_loop(
-    stop: threading.Event, pool, settings: Settings, source, webhook_url: str, interval_s: float,
-    api_key: str | None = None,
-) -> None:
-    with httpx.Client(timeout=httpx.Timeout(10.0), follow_redirects=False) as client:
-        while not stop.is_set():
-            try:
-                p = pull_once(pool, source, settings)
-                f = forward_once(pool, client, webhook_url, api_key=api_key)
-                if p.pulled or f.sent or f.failed or f.dead:
-                    log.info(
-                        "cycle pulled=%d new=%d merged=%d rejected=%d sent=%d failed=%d dead=%d",
-                        p.pulled, p.new, p.merged, p.rejected, f.sent, f.failed, f.dead,
-                    )
-            except Exception as e:  # keep the loop alive; the inbox makes retries safe
-                log.error("cycle error: %s", type(e).__name__)
-            stop.wait(interval_s)
+def run_loop(stop: threading.Event, pool, settings: Settings, source, deliver: Deliver, interval_s: float) -> None:
+    while not stop.is_set():
+        try:
+            p = pull_once(pool, source, settings)
+            f = forward_once(pool, deliver)
+            if p.pulled or f.sent or f.failed or f.dead:
+                log.info(
+                    "cycle pulled=%d new=%d merged=%d rejected=%d sent=%d failed=%d dead=%d",
+                    p.pulled, p.new, p.merged, p.rejected, f.sent, f.failed, f.dead,
+                )
+        except Exception as e:  # keep the loop alive; the inbox makes retries safe
+            log.error("cycle error: %s", type(e).__name__)
+        stop.wait(interval_s)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings.for_gateway()
     pool = make_pool(settings.db_url)
-    webhook_url = read_secret("DECA_TRACECAT_WEBHOOK_URL")
-    # Tracecat webhook API key (x-tracecat-api-key); production sets it, the URL secret alone is weaker.
-    api_key = read_secret("DECA_TRACECAT_WEBHOOK_API_KEY", required=os.environ.get("DECA_ENV") == "production")
+    starter = TemporalStarter(TemporalSettings.from_env(), identity=f"deca-gateway@{os.uname().nodename}")
     stop = threading.Event()
     t = threading.Thread(
         target=run_loop,
-        args=(stop, pool, settings, build_source(), webhook_url, float(os.environ.get("DECA_PULL_INTERVAL_S", "15")),
-              api_key),
+        args=(stop, pool, settings, build_source(), starter, float(os.environ.get("DECA_PULL_INTERVAL_S", "15"))),
         name="gateway-loop",
         daemon=True,
     )
@@ -70,6 +62,8 @@ async def lifespan(app: FastAPI):
     yield
     stop.set()
     t.join(timeout=15)
+    if not t.is_alive():
+        starter.close()
     pool.close()
 
 

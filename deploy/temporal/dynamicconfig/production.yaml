@@ -1,0 +1,8 @@
+# Dynamic config for the DECA Temporal server. Keys: https://github.com/temporalio/temporal/blob/v1.32.2/common/dynamicconfig/constants.go
+# Keep small: payloads are tokenised alerts (a few KB). Larger inputs are a bug, not a reason to raise limits.
+limit.blobSize.warn:
+  - value: 65536
+limit.blobSize.error:
+  - value: 262144
+frontend.namespaceRPS:
+  - value: 400

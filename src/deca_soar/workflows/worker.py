@@ -1,0 +1,78 @@
+"""Worker process: runs AlertShadowWorkflow and its activities.
+
+  DECA_BROKER_URL             broker base URL (https required with DECA_ENV=production)
+  DECA_BROKER_TOKEN(_FILE)    service principal token, role analyst
+  DECA_BROKER_CA_FILE         CA bundle for the broker's TLS cert (optional)
+  plus the DECA_TEMPORAL_* settings in deca_soar.workflows.config.
+
+The worker holds no database URL and no vault or tokenisation key: it only ever sees tokens.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import signal
+
+from temporalio.worker import Worker
+
+from deca_soar.common.config import ConfigError, assert_no_write_credentials, read_secret
+from deca_soar.workflows.activities import BrokerSubmitter, triage_mock
+from deca_soar.workflows.config import TemporalSettings
+from deca_soar.workflows.shadow import AlertShadowWorkflow
+
+log = logging.getLogger("deca_soar.worker")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+WORKER_FORBIDDEN_ENV = ("DECA_DB_URL", "DECA_VAULT_PRIVATE_KEY", "DECA_VAULT_KEY", "DECA_TOKENIZATION_KEY")
+
+
+def broker_from_env() -> BrokerSubmitter:
+    url = os.environ.get("DECA_BROKER_URL", "").strip()
+    if not url:
+        raise ConfigError("DECA_BROKER_URL is required")
+    if os.environ.get("DECA_ENV") == "production" and not url.startswith("https://"):
+        raise ConfigError("production requires an https:// DECA_BROKER_URL")
+    token = read_secret("DECA_BROKER_TOKEN")
+    assert token is not None
+    return BrokerSubmitter(url, token, verify=os.environ.get("DECA_BROKER_CA_FILE") or True)
+
+
+def check_env() -> None:
+    assert_no_write_credentials()
+    bad = [n for n in WORKER_FORBIDDEN_ENV if os.environ.get(n) or os.environ.get(f"{n}_FILE")]
+    if bad:
+        raise ConfigError("worker must not hold database or vault credentials (found: " + ", ".join(bad) + ")")
+
+
+async def run() -> None:
+    check_env()
+    ts = TemporalSettings.from_env()
+    broker = broker_from_env()
+    client = await ts.connect(identity=f"deca-worker@{os.uname().nodename}")
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+    worker = Worker(
+        client,
+        task_queue=ts.task_queue,
+        workflows=[AlertShadowWorkflow],
+        activities=[triage_mock, broker.submit],
+        max_concurrent_activities=int(os.environ.get("DECA_WORKER_MAX_ACTIVITIES", "20")),
+    )
+    log.info("worker ready: namespace=%s task_queue=%s tls=%s", ts.namespace, ts.task_queue, ts.tls is not None)
+    async with worker:
+        await stop.wait()
+    await broker.aclose()
+    log.info("worker stopped")
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    asyncio.run(run())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

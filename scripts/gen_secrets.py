@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
-"""Generate fresh platform secrets into a new 0600 file outside the repository. Values are never printed.
+"""Generate fresh DECA keys, one 0600 file each, into a directory outside the repository.
+Values are never printed. Existing files are never overwritten.
 
-  python scripts/gen_secrets.py /etc/deca-soar/secrets.env
-The file holds only generated keys; append the RDS/Tair/OSS connection values by hand (see RUNBOOK).
+  python scripts/gen_secrets.py /etc/deca-soar/secrets
+
+DB URLs, the broker worker token (deca-soar create-principal) and TLS material are created separately
+(see deploy/RUNBOOK.md).
 """
 
 from __future__ import annotations
 
-import base64
-import json
 import os
 import secrets
 import sys
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def generate() -> dict[str, str]:
+    vault = X25519PrivateKey.generate()
     return {
-        # Tracecat platform secrets (docs/self-hosting/security.mdx)
-        "TRACECAT__DB_ENCRYPTION_KEY": base64.urlsafe_b64encode(os.urandom(32)).decode(),
-        "TRACECAT__SERVICE_KEY": secrets.token_urlsafe(48),
-        "TRACECAT__SIGNING_SECRET": secrets.token_urlsafe(48),
-        "USER_AUTH_SECRET": secrets.token_urlsafe(48),
-        "TEMPORAL__PAYLOAD_ENCRYPTION_KEYRING": json.dumps(
-            {"current_key_id": "v1", "keys": {"v1": secrets.token_hex(32)}}, separators=(",", ":")
-        ),
-        # DECA gateway/broker
-        "DECA_TOKENIZATION_KEY": secrets.token_hex(32),
-        "DECA_VAULT_KEY": secrets.token_hex(32),
+        # Gateway: HMAC tokenisation key + vault public key (seal only).
+        "deca_tokenization_key": secrets.token_hex(32),
+        "deca_vault_public_key": vault.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
+        # Broker only: opens vault entries to check targets.
+        "deca_vault_private_key": vault.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()).hex(),
+        # Gateway + worker: Temporal payload codec (AES-256-GCM). The Temporal server never sees it.
+        "deca_temporal_payload_key": secrets.token_hex(32),
     }
 
 
@@ -38,17 +39,20 @@ def main() -> int:
         print(__doc__, file=sys.stderr)
         return 2
     out = Path(sys.argv[1]).resolve()
-    try:
-        out.relative_to(ROOT.resolve())
+    if out == ROOT.resolve() or ROOT.resolve() in out.parents:
         print("refusing to write secrets inside the repository", file=sys.stderr)
         return 2
-    except ValueError:
-        pass
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as f:
-        for k, v in generate().items():
-            f.write(f"{k}='{v}'\n")
-    print(f"wrote {len(generate())} generated secrets to {out} (mode 0600)")
+    out.mkdir(mode=0o700, parents=True, exist_ok=True)
+    values = generate()
+    clash = [n for n in values if (out / n).exists()]
+    if clash:
+        print("refusing to overwrite existing: " + ", ".join(clash), file=sys.stderr)
+        return 2
+    for name, value in values.items():
+        fd = os.open(out / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(value + "\n")
+    print(f"wrote {len(values)} keys to {out} (mode 0600): " + ", ".join(values))
     return 0
 
 

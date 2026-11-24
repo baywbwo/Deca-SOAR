@@ -94,6 +94,12 @@ def cmd_kill_switch(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_worker(_: argparse.Namespace) -> int:
+    from deca_soar.workflows.worker import main as worker_main
+
+    return worker_main()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="deca-soar")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -115,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     ks.add_argument("--scope", default="global")
     ks.add_argument("--principal", required=True)
     ks.set_defaults(fn=cmd_kill_switch)
+    sub.add_parser("worker", help="run the Temporal alert worker").set_defaults(fn=cmd_worker)
     a = ap.parse_args(argv)
     return a.fn(a)
 
