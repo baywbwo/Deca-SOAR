@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,65 +7,102 @@
 <link rel="stylesheet" href="/static/console.css">
 <script src="/static/console.js" defer></script>
 </head>
-<body>
-<div class="strip" id="strip">
-  <span class="pulse" aria-hidden="true"></span>
-  <b id="strip-mode">Mode bayangan (shadow)</b>
-  <span class="lvl" id="strip-text">Broker hanya mencatat keputusan; tidak ada aksi yang dieksekusi ke WAF.</span>
-  <span class="sp"></span>
-  <span class="kill" id="kill" role="status">Kill switch: memuat…</span>
-</div>
-<header>
-  <div class="brand"><span class="logo" aria-hidden="true">H</span><span class="t1">HyperSoar</span><span class="t2">Console</span></div>
-  <span class="chip"><strong>Baca saja</strong></span>
-  <div class="hdr-right">
-    <span class="chip sample" id="synthetic" hidden>Data sintetis</span>
-    <span class="chip" id="chain-chip"><span class="dot" id="chain-dot"></span>Rantai audit <strong id="chain-word">…</strong></span>
-    <span class="chip">WIB <strong class="num" id="clock">--:--:--</strong></span>
-    <form method="post" action="/logout" class="who"><span id="who-name">owner</span><button type="submit" class="btn">Keluar</button></form>
+<body class="app">
+<header class="top">
+  <a class="brand" href="/" aria-label="HyperSoar console home">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M6 6.5 10 5v9.5h12V5l4 1.5v19L22 27v-9.5H10V27l-4-1.5z" fill="#e3000f"/><rect x="3" y="12.5" width="26" height="2.4" fill="#0b0b0c"/><rect x="7" y="12.5" width="21" height="2.4" fill="#f4f4f4"/></svg>
+    <span class="word">HyperSoar</span>
+  </a>
+  <span class="entity" id="entity">PT Delta Omega Beta</span>
+  <div class="top-r">
+    <span class="flag" id="synthetic" hidden>Synthetic data</span>
+    <span class="meta-item"><span class="dot" id="chain-dot"></span>Audit chain <strong id="chain-word">…</strong></span>
+    <span class="meta-item num"><span id="clock">--:--:--</span> WIB</span>
+    <form method="post" action="/logout" class="who"><span id="who-name">owner</span><button type="submit" class="btn ghost">Sign out</button></form>
   </div>
 </header>
-<main>
+
+<div class="mode" id="strip" role="status">
+  <span class="slice" aria-hidden="true"></span>
+  <strong id="strip-mode">Shadow mode</strong>
+  <span id="strip-text">The broker records every decision. Nothing is executed against the WAF.</span>
+  <span class="sp"></span>
+  <span class="kill" id="kill">Kill switch: loading</span>
+</div>
+
+<main class="wrap">
   <p class="banner" id="error" role="alert" hidden></p>
-  <section class="readouts" aria-label="Ringkasan">
-    <div class="ro"><span class="k">Alert masuk, 1 jam</span><span class="v num" id="r-alerts">–</span><span class="t" id="r-alerts-t">total –</span></div>
-    <div class="ro"><span class="k">Diteruskan ke Temporal</span><span class="v num" id="r-forwarded">–</span><span class="t" id="r-forwarded-t">pending – · dead –</span></div>
-    <div class="ro"><span class="k">Keputusan broker</span><span class="v num" id="r-decisions">–</span><span class="t">semua mode shadow</span></div>
-    <div class="ro"><span class="k">Lolos kebijakan (shadow)</span><span class="v num ok" id="r-validated">–</span><span class="t">akan dieksekusi bila mode aktif</span></div>
-    <div class="ro"><span class="k">Ditolak kebijakan</span><span class="v num warn" id="r-rejected">–</span><span class="t">target dilindungi, kill switch, dll.</span></div>
+
+  <section class="hero" aria-labelledby="signal-h">
+    <div class="signal">
+      <div class="signal-head">
+        <div>
+          <h1 id="signal-h">Threat signal</h1>
+          <p class="sub">Alerts ingested per hour, last 24 hours</p>
+        </div>
+        <div class="big">
+          <span class="v num" id="r-alerts">–</span>
+          <span class="k">alerts in the last hour</span>
+        </div>
+      </div>
+      <svg class="chart" id="chart" viewBox="0 0 960 220" preserveAspectRatio="none" role="img" aria-labelledby="chart-t">
+        <title id="chart-t">Hourly alert volume for the last 24 hours</title>
+      </svg>
+      <div class="axis num" id="axis" aria-hidden="true"></div>
+      <ul class="legend">
+        <li><span class="sw hi"></span>High and critical</li>
+        <li><span class="sw md"></span>Medium</li>
+        <li><span class="sw lo"></span>Low and info</li>
+      </ul>
+    </div>
+    <div class="pipe" aria-labelledby="flow-h">
+      <h2 id="flow-h">Pipeline</h2>
+      <p class="sub">Since the first alert</p>
+      <ol class="flow" id="flow"></ol>
+    </div>
   </section>
+
+  <section class="stats" aria-label="Summary">
+    <div class="stat"><span class="k">Total alerts</span><span class="v num" id="r-total">–</span><span class="t" id="r-total-t">–</span></div>
+    <div class="stat"><span class="k">Forwarded to Temporal</span><span class="v num" id="r-forwarded">–</span><span class="t" id="r-forwarded-t">–</span></div>
+    <div class="stat"><span class="k">Broker decisions</span><span class="v num" id="r-decisions">–</span><span class="t">All in shadow mode</span></div>
+    <div class="stat"><span class="k">Passed policy</span><span class="v num" id="r-validated">–</span><span class="t">Would run in active mode</span></div>
+    <div class="stat alert"><span class="k">Blocked by policy</span><span class="v num" id="r-rejected">–</span><span class="t">Protected target, kill switch, rate limit</span></div>
+  </section>
+
   <div class="grid">
-    <section class="pnl feed" aria-labelledby="feed-h">
-      <div class="pnl-h"><h2 id="feed-h">Alert dan keputusan terbaru</h2><span class="sub">gateway → triage → broker shadow</span><span class="r sub" id="updated">memuat…</span></div>
+    <section class="pnl" aria-labelledby="feed-h">
+      <div class="pnl-h"><h2 id="feed-h">Detections</h2><span class="sub">Gateway, triage, broker</span><span class="r sub num" id="updated">loading</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th scope="col">Waktu</th><th scope="col">Alert</th><th scope="col">Gateway</th><th scope="col">Triage</th><th scope="col">Broker (shadow)</th></tr></thead>
-          <tbody id="feed"><tr><td colspan="5" class="small">Memuat…</td></tr></tbody>
+          <thead><tr><th scope="col" class="c-time">Time</th><th scope="col" class="c-det">Detection</th><th scope="col" class="c-gw">Gateway</th><th scope="col" class="c-tri">Triage</th><th scope="col">Broker decision</th></tr></thead>
+          <tbody id="feed"><tr><td colspan="5" class="muted">Loading</td></tr></tbody>
         </table>
       </div>
     </section>
     <aside class="side">
-      <section class="pnl" aria-labelledby="flow-h">
-        <div class="pnl-h"><h2 id="flow-h">Alur</h2><span class="sub">jumlah sejak awal</span></div>
-        <ol class="flow" id="flow"></ol>
+      <section class="pnl" aria-labelledby="rules-h">
+        <div class="pnl-h"><h2 id="rules-h">Top rules</h2><span class="sub">Last 24 hours</span></div>
+        <ol class="rules" id="rules"></ol>
       </section>
       <section class="pnl" aria-labelledby="ledger-h">
-        <div class="pnl-h"><h2 id="ledger-h">Rantai audit</h2><span class="sub" id="ledger-sub">–</span></div>
+        <div class="pnl-h"><h2 id="ledger-h">Audit chain</h2><span class="sub num" id="ledger-sub">–</span></div>
         <div class="ledger-head" id="ledger-head"></div>
         <ol class="ledger" id="ledger"></ol>
       </section>
       <section class="pnl" aria-labelledby="ks-h">
-        <div class="pnl-h"><h2 id="ks-h">Kill switch</h2><span class="sub">status, baca saja</span></div>
+        <div class="pnl-h"><h2 id="ks-h">Kill switch</h2><span class="sub">Read only</span></div>
         <ul class="ks" id="ks"></ul>
       </section>
     </aside>
   </div>
 </main>
-<footer class="status">
-  <span id="f-ingest">Ingest terakhir –</span>
-  <span>Temporal 1.32.2 (mTLS)</span>
-  <span>Triage: mock-phase0 (tanpa LLM)</span>
-  <span>Anchor: file lokal (pengganti SLS)</span>
+
+<footer class="status num">
+  <span id="f-ingest">Last ingest –</span>
+  <span>Temporal 1.32.2, mTLS</span>
+  <span id="f-triage">Triage –</span>
+  <span>Anchor: local file</span>
   <span class="sp"></span>
   <span id="f-sha">build –</span>
 </footer>

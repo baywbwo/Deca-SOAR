@@ -199,6 +199,7 @@ def test_security_headers(console):
     assert h["referrer-policy"] == "same-origin" and h["cache-control"] == "no-store"
     assert "strict-transport-security" in h
     assert "<script" not in r.text and "style=" not in r.text
+    assert "font-src 'self';" in h["content-security-policy"] and "default-src 'none'" in h["content-security-policy"]
 
 
 def test_static_has_no_inline_code_and_unknown_files_404(console):
@@ -210,6 +211,12 @@ def test_static_has_no_inline_code_and_unknown_files_404(console):
     assert console.get("/static/console.js").status_code == 200
     assert console.get("/static/../app.py").status_code == 404
     assert console.get("/static/index.html").status_code == 404
+    for name, mime in [("intercept.svg", "image/svg+xml"), ("geist-sans.woff2", "font/woff2"),
+                       ("geist-mono.woff2", "font/woff2")]:
+        r = console.get(f"/static/{name}")
+        assert r.status_code == 200 and r.headers["content-type"].startswith(mime)
+    art = (STATIC / "intercept.svg").read_text()
+    assert "<script" not in art and "href=\"http" not in art and "url(http" not in art
 
 
 def test_no_write_endpoints():
@@ -252,6 +259,8 @@ def test_state_shows_alert_verdict_and_shadow_decision(client, principals, pool,
     assert all(a["triage"]["verdict"] == "malicious" and a["broker"]["mode"] == "shadow" for a in s["feed"])
     assert s["ledger"]["ok"] and s["ledger"]["entries"] >= 6 and s["ledger"]["tail"]
     assert s["kill_switch"]["any_engaged"] is False
+    assert len(s["timeline"]) == 24 and sum(h["high"] for h in s["timeline"]) == 2
+    assert s["top_rules"] == [{"rule_id": "waf.sqli.burst", "source": "waf", "n": 2, "severity": "high"}]
     assert "203.0.113.44" not in r.text and "198.51.100.7" not in r.text
 
 

@@ -37,7 +37,8 @@ STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "__Host-hypersoar_console"
 MAX_BODY = 4096
 
-CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self';"
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self';"
+       " connect-src 'self';"
        " form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 SECURITY_HEADERS = {
     "content-security-policy": CSP,
@@ -119,31 +120,37 @@ def _client(request: Request) -> str:
 
 LOGIN_MESSAGES = {
     None: "",
-    "bad": "Nama pengguna atau kata sandi salah.",
-    "limit": "Terlalu banyak percobaan. Coba lagi beberapa menit lagi.",
-    "origin": "Permintaan ditolak. Muat ulang halaman ini lalu coba lagi.",
+    "bad": "Wrong username or password",
+    "limit": "Too many attempts. Wait a few minutes and try again",
+    "origin": "Request rejected. Reload this page and try again",
 }
 
 
 def _login_page(request: Request, status: int = 200, msg: str | None = None) -> HTMLResponse:
     text = html.escape(LOGIN_MESSAGES[msg])
-    synthetic = '<p class="chip sample">Data sintetis</p>' if request.app.state.synthetic else ""
+    synthetic = '<span class="flag">Synthetic data</span>' if request.app.state.synthetic else ""
     body = f"""<!doctype html>
-<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Masuk · HyperSoar Console</title><link rel="stylesheet" href="/static/console.css"></head>
-<body class="login-body"><main class="login">
-<div class="brand"><span class="logo" aria-hidden="true">H</span><span class="t1">HyperSoar</span><span class="t2">Console</span></div>
-{synthetic}
-<form method="post" action="/login" class="login-form">
-<h1>Masuk</h1>
-<p class="small">Tampilan baca saja untuk pemilik. Tidak ada tombol aksi.</p>
-<label for="username">Nama pengguna</label>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · HyperSoar Console</title><link rel="stylesheet" href="/static/console.css"></head>
+<body class="gate">
+<div class="art" aria-hidden="true"></div>
+<main class="gate-panel">
+<div class="gate-top"><span class="word">HyperSoar</span>{synthetic}</div>
+<div class="gate-copy">
+<p class="eyebrow">Security orchestration console</p>
+<h1 class="display">Watch every<br>decision<span class="cut">.</span></h1>
+<p class="lede">Read-only view of the gateway, triage and action broker. Nothing here can change state.</p>
+</div>
+<form method="post" action="/login" class="gate-form">
+<label for="username">Username</label>
 <input id="username" name="username" autocomplete="username" required maxlength="64" autofocus>
-<label for="password">Kata sandi</label>
+<label for="password">Password</label>
 <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
 <p class="err" role="alert">{text}</p>
-<button type="submit" class="btn pri">Masuk</button>
-</form></main></body></html>"""
+<button type="submit" class="btn pri">Sign in</button>
+</form>
+<p class="gate-foot">Owner access only. Sessions end after 8 hours, or 30 minutes idle</p>
+</main></body></html>"""
     return HTMLResponse(body, status_code=status)
 
 
@@ -207,7 +214,8 @@ def index(request: Request):
 
 @fastapi_app.get("/static/{name}")
 def static(name: str):
-    files = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8"}
+    files = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8",
+             "intercept.svg": "image/svg+xml", "geist-sans.woff2": "font/woff2", "geist-mono.woff2": "font/woff2"}
     if name not in files:
         return Response(status_code=404)
     return FileResponse(STATIC / name, media_type=files[name])

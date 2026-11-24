@@ -11,6 +11,8 @@ from hypersoar import ledger
 FEED_LIMIT = 30
 LEDGER_TAIL = 10
 TEXT_MAX = 160
+TOP_RULES = 6
+SEVERITY_ORDER = ("info", "low", "medium", "high", "critical")
 
 
 def _iso(v) -> str | None:
@@ -123,6 +125,32 @@ def counts(conn) -> dict:
     }
 
 
+def timeline(conn) -> list[dict]:
+    """24 hourly buckets ending with the current hour, oldest first, empty hours included."""
+    rows = conn.execute(
+        "SELECT h.hour,"
+        " count(e.alert_id) FILTER (WHERE e.severity_hint IN ('high', 'critical')) AS high,"
+        " count(e.alert_id) FILTER (WHERE e.severity_hint = 'medium') AS medium,"
+        " count(e.alert_id) FILTER (WHERE e.severity_hint IN ('low', 'info')) AS low"
+        " FROM generate_series(date_trunc('hour', now()) - interval '23 hours', date_trunc('hour', now()),"
+        "   interval '1 hour') AS h(hour)"
+        " LEFT JOIN gateway.inbox_event e ON e.ingested_at >= h.hour AND e.ingested_at < h.hour + interval '1 hour'"
+        " GROUP BY h.hour ORDER BY h.hour").fetchall()
+    return [{"hour": _iso(r["hour"]), "high": r["high"], "medium": r["medium"], "low": r["low"]} for r in rows]
+
+
+def top_rules(conn) -> list[dict]:
+    rows = conn.execute(
+        "SELECT rule_id, source, count(*) AS n,"
+        " (%(sev)s::text[])[max(array_position(%(sev)s::text[], severity_hint))] AS severity"
+        " FROM gateway.inbox_event WHERE ingested_at > now() - interval '24 hours'"
+        " GROUP BY rule_id, source ORDER BY n DESC, rule_id LIMIT %(limit)s",
+        {"sev": list(SEVERITY_ORDER), "limit": TOP_RULES},
+    ).fetchall()
+    return [{"rule_id": _clip(r["rule_id"], 80), "source": r["source"], "n": r["n"],
+             "severity": r["severity"]} for r in rows]
+
+
 def kill_switch(conn) -> dict:
     rows = conn.execute(
         "SELECT scope, engaged, changed_at FROM broker.kill_switch ORDER BY scope").fetchall()
@@ -148,4 +176,6 @@ def state(conn, ledger_status: LedgerStatus) -> dict:
         "kill_switch": kill_switch(conn),
         "ledger": {**ledger_status.get(conn), "tail": ledger_tail(conn)},
         "feed": feed(conn),
+        "timeline": timeline(conn),
+        "top_rules": top_rules(conn),
     }
