@@ -37,6 +37,14 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
     "auditor": ("deca_soar_auditor", {
         "ledger.entry": {"SELECT"},
     }),
+    # Read-only SOC console (migration 0004).
+    "console": ("deca_soar_viewer", {
+        "gateway.inbox_event": {"SELECT"},
+        "broker.decision_record": {"SELECT"},
+        "broker.action_request": {"SELECT"},
+        "broker.kill_switch": {"SELECT"},
+        "ledger.entry": {"SELECT"},
+    }),
 }
 
 LEDGER_WRITERS = ("gateway", "broker")
@@ -49,6 +57,7 @@ EXPECTED_COLUMNS: dict[str, set[tuple[str, str, str]]] = {
                | {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
     "broker": {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
     "auditor": set(),
+    "console": set(),
 }
 
 

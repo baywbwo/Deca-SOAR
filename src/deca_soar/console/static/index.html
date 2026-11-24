@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DECA SOC Console</title>
+<link rel="stylesheet" href="/static/console.css">
+<script src="/static/console.js" defer></script>
+</head>
+<body>
+<div class="strip" id="strip">
+  <span class="pulse" aria-hidden="true"></span>
+  <b id="strip-mode">Mode bayangan (shadow)</b>
+  <span class="lvl" id="strip-text">Broker hanya mencatat keputusan; tidak ada aksi yang dieksekusi ke WAF.</span>
+  <span class="sp"></span>
+  <span class="kill" id="kill" role="status">Kill switch: memuat…</span>
+</div>
+<header>
+  <div class="brand"><span class="logo" aria-hidden="true">D</span><span class="t1">DECA</span><span class="t2">SOC Console</span></div>
+  <span class="chip"><strong>Baca saja</strong></span>
+  <div class="hdr-right">
+    <span class="chip sample" id="synthetic" hidden>Data sintetis</span>
+    <span class="chip" id="chain-chip"><span class="dot" id="chain-dot"></span>Rantai audit <strong id="chain-word">…</strong></span>
+    <span class="chip">WIB <strong class="num" id="clock">--:--:--</strong></span>
+    <form method="post" action="/logout" class="who"><span id="who-name">owner</span><button type="submit" class="btn">Keluar</button></form>
+  </div>
+</header>
+<main>
+  <p class="banner" id="error" role="alert" hidden></p>
+  <section class="readouts" aria-label="Ringkasan">
+    <div class="ro"><span class="k">Alert masuk, 1 jam</span><span class="v num" id="r-alerts">–</span><span class="t" id="r-alerts-t">total –</span></div>
+    <div class="ro"><span class="k">Diteruskan ke Temporal</span><span class="v num" id="r-forwarded">–</span><span class="t" id="r-forwarded-t">pending – · dead –</span></div>
+    <div class="ro"><span class="k">Keputusan broker</span><span class="v num" id="r-decisions">–</span><span class="t">semua mode shadow</span></div>
+    <div class="ro"><span class="k">Lolos kebijakan (shadow)</span><span class="v num ok" id="r-validated">–</span><span class="t">akan dieksekusi bila mode aktif</span></div>
+    <div class="ro"><span class="k">Ditolak kebijakan</span><span class="v num warn" id="r-rejected">–</span><span class="t">target dilindungi, kill switch, dll.</span></div>
+  </section>
+  <div class="grid">
+    <section class="pnl feed" aria-labelledby="feed-h">
+      <div class="pnl-h"><h2 id="feed-h">Alert dan keputusan terbaru</h2><span class="sub">gateway → triage → broker shadow</span><span class="r sub" id="updated">memuat…</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Waktu</th><th scope="col">Alert</th><th scope="col">Gateway</th><th scope="col">Triage</th><th scope="col">Broker (shadow)</th></tr></thead>
+          <tbody id="feed"><tr><td colspan="5" class="small">Memuat…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <aside class="side">
+      <section class="pnl" aria-labelledby="flow-h">
+        <div class="pnl-h"><h2 id="flow-h">Alur</h2><span class="sub">jumlah sejak awal</span></div>
+        <ol class="flow" id="flow"></ol>
+      </section>
+      <section class="pnl" aria-labelledby="ledger-h">
+        <div class="pnl-h"><h2 id="ledger-h">Rantai audit</h2><span class="sub" id="ledger-sub">–</span></div>
+        <div class="ledger-head" id="ledger-head"></div>
+        <ol class="ledger" id="ledger"></ol>
+      </section>
+      <section class="pnl" aria-labelledby="ks-h">
+        <div class="pnl-h"><h2 id="ks-h">Kill switch</h2><span class="sub">status, baca saja</span></div>
+        <ul class="ks" id="ks"></ul>
+      </section>
+    </aside>
+  </div>
+</main>
+<footer class="status">
+  <span id="f-ingest">Ingest terakhir –</span>
+  <span>Temporal 1.32.2 (mTLS)</span>
+  <span>Triage: mock-phase0 (tanpa LLM)</span>
+  <span>Anchor: file lokal (pengganti SLS)</span>
+  <span class="sp"></span>
+  <span id="f-sha">build –</span>
+</footer>
+</body>
+</html>

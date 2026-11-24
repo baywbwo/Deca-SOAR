@@ -104,6 +104,26 @@ def cmd_worker(_: argparse.Namespace) -> int:
     return worker_main()
 
 
+def cmd_console_hash(_: argparse.Namespace) -> int:
+    """Read a password on stdin, print its scrypt hash for DECA_CONSOLE_PASSWORD_HASH_FILE."""
+    from deca_soar.console.auth import hash_password
+
+    password = sys.stdin.readline().rstrip("\n")
+    try:
+        print(hash_password(password))
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_synth_alerts(a: argparse.Namespace) -> int:
+    from deca_soar import synth
+
+    synth.run(Path(a.out), a.interval, a.count, a.seed, log=lambda m: print(m, flush=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="deca-soar")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -126,6 +146,13 @@ def main(argv: list[str] | None = None) -> int:
     ks.add_argument("--principal", required=True)
     ks.set_defaults(fn=cmd_kill_switch)
     sub.add_parser("worker", help="run the Temporal alert worker").set_defaults(fn=cmd_worker)
+    sub.add_parser("console-hash", help="hash a console password read from stdin").set_defaults(fn=cmd_console_hash)
+    sa = sub.add_parser("synth-alerts", help="lab only: append synthetic raw alerts to a replay file")
+    sa.add_argument("--out", required=True, help="replay NDJSON file read by the gateway")
+    sa.add_argument("--interval", type=float, default=90.0, help="seconds between alerts")
+    sa.add_argument("--count", type=int, default=0, help="stop after this many alerts (0 = run forever)")
+    sa.add_argument("--seed", type=int, default=None)
+    sa.set_defaults(fn=cmd_synth_alerts)
     a = ap.parse_args(argv)
     return a.fn(a)
 
