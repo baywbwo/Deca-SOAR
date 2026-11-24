@@ -3,9 +3,11 @@
 Each service logs in as its own user, a member of exactly one NOLOGIN group role from migration
 0002. Before doing any work it checks that this login cannot do more than that group needs: no
 superuser or other role attributes, no membership in the owner (or any other role), no object
-ownership and no table, sequence, schema or database privilege outside the expected set. A login
-that fails any check makes the process refuse to start, so a mistakenly configured owner or admin
-DSN never reaches a running service. There is no switch to turn this off.
+ownership and no table, column, sequence, function, schema or database privilege outside the
+expected set. The session user must be the current user: a login that only switched role (for
+example `options=-c role=...` in the DSN) could `RESET ROLE` back to its own rights (review N8).
+A login that fails any check makes the process refuse to start, so a mistakenly configured owner
+or admin DSN never reaches a running service. There is no switch to turn this off.
 """
 
 from __future__ import annotations
@@ -15,8 +17,7 @@ from deca_soar.common.config import ConfigError
 DECA_SCHEMAS = ("gateway", "vault", "broker", "ledger")
 TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 
-# service -> (group role, {table: table-level privileges}). Column-level grants (vault.token_map
-# SELECT(token) for the gateway, ledger.entry INSERT without seq) do not show at table level.
+# service -> (group role, {table: table-level privileges}). Column-level grants are in EXPECTED_COLUMNS.
 EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
     "gateway": ("deca_soar_gateway", {
         "gateway.ingest_cursor": {"SELECT", "INSERT", "UPDATE"},
@@ -39,6 +40,16 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
 }
 
 LEDGER_WRITERS = ("gateway", "broker")
+COLUMN_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "REFERENCES")
+LEDGER_INSERT_COLUMNS = ("recorded_at", "event_type", "actor", "payload", "canonical", "prev_hash", "hash")
+
+# service -> {(table, column, privilege)} granted per column (migrations 0002 and 0003), on top of EXPECTED.
+EXPECTED_COLUMNS: dict[str, set[tuple[str, str, str]]] = {
+    "gateway": {("vault.token_map", "token", "SELECT")}
+               | {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
+    "broker": {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
+    "auditor": set(),
+}
 
 
 def login_problems(conn, service: str) -> list[str]:
@@ -49,24 +60,32 @@ def login_problems(conn, service: str) -> list[str]:
     def rows(sql: str, params=()):
         return [tuple(r.values()) if isinstance(r, dict) else tuple(r) for r in conn.execute(sql, params).fetchall()]
 
-    (user, superuser, createrole, createdb, bypassrls, replication), = rows(
-        "SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication"
-        " FROM pg_roles WHERE rolname = current_user"
-    )
-    for name, value in (("SUPERUSER", superuser), ("CREATEROLE", createrole), ("CREATEDB", createdb),
-                        ("BYPASSRLS", bypassrls), ("REPLICATION", replication)):
-        if value:
-            problems.append(f"login has {name}")
+    (user, session), = rows("SELECT current_user::text, session_user::text")
+    if session != user:
+        problems.append(f"session user {session} switched to {user}; RESET ROLE would regain {session}'s rights")
 
-    # Includes indirect membership and pg_database_owner (true when the login owns the database).
-    member_of = {r[0] for r in rows(
-        "SELECT rolname FROM pg_roles WHERE rolname <> current_user"
-        " AND pg_has_role(current_user, oid, 'MEMBER')"
-    )}
-    if group not in member_of:
-        problems.append(f"login is not a member of {group}")
-    for extra in sorted(member_of - {group}):
-        problems.append(f"login is a member of {extra}")
+    # Attributes and memberships of the session user too: that is what RESET ROLE returns to.
+    for login in dict.fromkeys((user, session)):
+        who = "login" if login == user else f"session user {login}"
+        (superuser, createrole, createdb, bypassrls, replication), = rows(
+            "SELECT rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication"
+            " FROM pg_roles WHERE rolname = %s",
+            (login,),
+        )
+        for name, value in (("SUPERUSER", superuser), ("CREATEROLE", createrole), ("CREATEDB", createdb),
+                            ("BYPASSRLS", bypassrls), ("REPLICATION", replication)):
+            if value:
+                problems.append(f"{who} has {name}")
+
+        # Includes indirect membership and pg_database_owner (true when the login owns the database).
+        member_of = {r[0] for r in rows(
+            "SELECT rolname FROM pg_roles WHERE rolname <> %s AND pg_has_role(%s::name, oid, 'MEMBER')",
+            (login, login),
+        )}
+        if login == user and group not in member_of:
+            problems.append(f"login is not a member of {group}")
+        for extra in sorted(member_of - {group}):
+            problems.append(f"{who} is a member of {extra}")
 
     for (obj,) in rows(
         "SELECT n.nspname FROM pg_namespace n WHERE n.nspname = ANY(%s)"
@@ -92,6 +111,30 @@ def login_problems(conn, service: str) -> list[str]:
     ):
         if priv not in tables.get(table, set()):
             problems.append(f"login has {priv} on {table}")
+
+    # Column grants: has_column_privilege is also true through a table-level grant, already checked above.
+    expected_columns = EXPECTED_COLUMNS[service]
+    for table, column, priv in rows(
+        "SELECT n.nspname || '.' || c.relname, a.attname::text, p FROM pg_class c"
+        " JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped"
+        " CROSS JOIN unnest(%s::text[]) p"
+        " WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname = ANY(%s)"
+        " AND has_column_privilege(c.oid, a.attnum, p) AND NOT has_table_privilege(c.oid, p)",
+        (list(COLUMN_PRIVILEGES), list(DECA_SCHEMAS)),
+    ):
+        if (table, column, priv) not in expected_columns:
+            problems.append(f"login has {priv}({column}) on {table}")
+
+    # No service calls functions; a SECURITY DEFINER one would run with its owner's rights.
+    for (func,) in rows(
+        "SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'"
+        " FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+        " WHERE (n.nspname = ANY(%s) OR (n.nspname = 'public' AND p.prosecdef))"
+        " AND p.prokind IN ('f', 'p') AND has_function_privilege(p.oid, 'EXECUTE')",
+        (list(DECA_SCHEMAS),),
+    ):
+        problems.append(f"login can EXECUTE {func}")
 
     for seq, priv in rows(
         "SELECT n.nspname || '.' || c.relname, p FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
