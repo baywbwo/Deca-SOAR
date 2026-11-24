@@ -25,8 +25,7 @@ Run as a sudoer on the VM, repo checked out at the commit to deploy (`$REPO`, `$
    ```sh
    docker build -f deploy/deca/Dockerfile -t deca-soar:$SHA .
    deploy/lab/fetch-temporal.sh /var/cache/deca-lab/temporal
-   docker build --build-context temporalbin=/var/cache/deca-lab/temporal \
-     -f deploy/lab/temporal.Dockerfile -t deca-lab-temporal:1.32.2 .
+   deploy/lab/build-temporal.sh /var/cache/deca-lab/temporal
    ```
 2. Secrets. On the operator machine, generate the owner password and the console password, keep both in
    the operator's vault, and hash the console password (`deca-soar console-hash` reads it on stdin). Send
@@ -77,6 +76,9 @@ Run as a sudoer on the VM, repo checked out at the commit to deploy (`$REPO`, `$
    $C --profile jobs run --rm ledger-anchor
    $C logs tunnel | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com'
    ```
+
+Hourly anchor (the lab has no systemd unit for the overlay): a user crontab line
+`15 * * * * cd $REPO && $C --profile jobs run --rm ledger-anchor >> ~/deca-lab-logs/anchor.log 2>&1`.
 
 The quick tunnel URL changes whenever the `tunnel` container restarts. To stop everything:
 `$C down` (add `-v` to drop the database volume).

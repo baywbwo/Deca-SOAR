@@ -33,7 +33,7 @@ services:
     networks:
       deca: {ipv4_address: 172.30.124.11}
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "/var/run/postgresql"]
+      test: ["CMD", "gosu", "postgres", "pg_isready", "-q", "-h", "/var/run/postgresql"]
       interval: 10s
       retries: 12
     logging:

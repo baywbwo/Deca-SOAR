@@ -1,12 +1,12 @@
 # Lab only: Temporal server 1.32.2 (MIT) as a container, standing in for the systemd host of
 # deploy/temporal. Same scripts and config as production. The binaries come from the official
-# releases (deploy/temporal/SOURCE.txt) via deploy/lab/fetch-temporal.sh and are checked again here:
-#   docker build --build-context temporalbin=<dir from fetch-temporal.sh> \
-#     -f deploy/lab/temporal.Dockerfile -t deca-lab-temporal:1.32.2 .
+# releases (deploy/temporal/SOURCE.txt) and are checked again here. Build with
+#   deploy/lab/build-temporal.sh <dir from fetch-temporal.sh>
+# which assembles a small context (temporal-bin/ + deploy/temporal) for the classic builder.
 FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
 RUN useradd --system --uid 10002 --home /nonexistent --shell /usr/sbin/nologin temporal
-COPY --from=temporalbin temporal-server temporal-sql-tool /opt/temporal/1.32.2/
-COPY --from=temporalbin temporal /opt/temporal/cli/temporal
+COPY temporal-bin/temporal-server temporal-bin/temporal-sql-tool /opt/temporal/1.32.2/
+COPY temporal-bin/temporal /opt/temporal/cli/temporal
 RUN cd /opt/temporal && printf '%s\n' \
       "f4a52911a0ce909d623475d048a1994329dada035c66a050d0440d8b6958b85e  1.32.2/temporal-server" \
       "c90014f9a3400fa245205f6dc402ebd105f5cbbd65139985a092a360d70bd71b  1.32.2/temporal-sql-tool" \
