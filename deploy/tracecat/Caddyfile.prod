@@ -1,0 +1,35 @@
+# DECA production Caddyfile for Tracecat 1.5.2 OSS (rendered alongside docker-compose.prod.yml).
+# Differences from upstream: no /s3 MinIO proxy (OSS is used directly), no MCP routes (MCP service dropped).
+# TLS terminates at the DECA reverse proxy in front of this; Caddy listens on the private bind only.
+{
+	servers {
+		trusted_proxies static {$TRACECAT__TRUSTED_PROXY_CIDRS}
+		trusted_proxies_strict
+	}
+	admin off
+}
+
+{$BASE_DOMAIN} {
+	bind {$ADDRESS}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+	}
+
+	handle_path /api* {
+		reverse_proxy http://api:8000 {
+			header_up X-Forwarded-For {client_ip}
+			header_up X-Real-IP {client_ip}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	reverse_proxy http://ui:3000 {
+		header_up X-Forwarded-For {client_ip}
+		header_up X-Real-IP {client_ip}
+	}
+}

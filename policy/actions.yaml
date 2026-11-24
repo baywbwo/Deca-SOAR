@@ -1,0 +1,98 @@
+# Action catalog (design 6.3 item 1, table 10). Changes go through PR + Security Engineer review.
+# `mode` is the target mode once promoted (7.4). This build is shadow-only: every request is
+# validated and recorded, nothing is executed, whatever `mode` says.
+version: 1
+actions:
+  case.close_benign:
+    level: L0
+    mode: auto
+    sources: [waf, actiontrail, sas, internal]
+    params: {}
+    max_severity: low            # 8.3: the LLM can never close a rule above this severity
+    allowed_verdicts: [benign]
+    min_confidence: 0.9
+    rollback: case.reopen
+
+  itsm.create_ticket:
+    level: L0
+    mode: auto
+    sources: [waf, actiontrail, sas, internal]
+    params:
+      team: {type: string, required: true, max_len: 64, pattern: "^[a-z0-9-]+$"}
+    allowed_verdicts: [suspicious, malicious]
+    min_confidence: 0.0
+    rate_limit: {per_hour: 30}
+
+  waf.ip_blacklist.add:
+    level: L1
+    mode: auto
+    sources: [waf]
+    target: {param: ip_token, kind: ip}
+    params:
+      ip_token: {type: token, kind: ip, required: true}
+      waf_instance: {type: string, required: true, max_len: 64, pattern: "^[A-Za-z0-9_.-]+$"}
+      ttl_s: {type: int, min: 60, max: 604800, default: 86400}
+    allowed_verdicts: [malicious]
+    min_confidence: 0.9
+    rate_limit: {per_hour: 50, scope_param: waf_instance}
+    rollback: waf.ip_blacklist.remove
+
+  waf.rate_limit.tighten:
+    level: L1
+    mode: auto
+    sources: [waf]
+    params:
+      waf_instance: {type: string, required: true, max_len: 64, pattern: "^[A-Za-z0-9_.-]+$"}
+      path: {type: string, required: true, max_len: 256, pattern: "^/[A-Za-z0-9/_.-]*$"}
+      ttl_s: {type: int, min: 60, max: 7200, default: 7200}
+    allowed_verdicts: [malicious]
+    min_confidence: 0.9
+    rate_limit: {per_hour: 5, scope_param: waf_instance}
+    rollback: waf.rate_limit.restore_snapshot
+
+  ram.user.console_session.revoke:
+    level: L1
+    mode: auto
+    sources: [actiontrail]
+    target: {param: principal_token, kind: user}
+    params:
+      principal_token: {type: token, kind: user, required: true}
+    allowed_verdicts: [malicious]
+    min_confidence: 0.9
+    rate_limit: {per_hour: 3}
+
+  ram.access_key.disable:
+    level: L2
+    mode: approval
+    sources: [actiontrail]
+    target: {param: access_key_token, kind: ak}
+    params:
+      access_key_token: {type: token, kind: ak, required: true}
+    allowed_verdicts: [suspicious, malicious]
+    min_confidence: 0.7
+    rate_limit: {per_hour: 1}
+    rollback: ram.access_key.enable
+
+  ram.policy.detach:
+    level: L2
+    mode: approval
+    sources: [actiontrail]
+    target: {param: principal_token, kind: user}
+    params:
+      principal_token: {type: token, kind: user, required: true}
+      policy_name: {type: string, required: true, max_len: 128, pattern: "^[A-Za-z0-9_.-]+$"}
+    allowed_verdicts: [suspicious, malicious]
+    min_confidence: 0.7
+    rate_limit: {per_hour: 1}
+    rollback: ram.policy.attach_snapshot
+
+  ecs.security_group.isolate:
+    level: L2
+    mode: approval
+    sources: [actiontrail, sas]
+    params:
+      instance_id: {type: string, required: true, max_len: 64, pattern: "^i-[A-Za-z0-9]+$"}
+    allowed_verdicts: [malicious]
+    min_confidence: 0.8
+    rate_limit: {per_hour: 1}
+    rollback: ecs.security_group.restore_snapshot

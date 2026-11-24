@@ -1,0 +1,80 @@
+# DECA SOAR gateway + broker (phase 0, shadow-only) on the small ECS of design 12.2 stage 1.
+# The broker listens only on this ECS's private VPC IP; the security group admits the Tracecat ECS only.
+# The gateway has no inbound port at all (pull-only); its health endpoint is on loopback.
+#   docker compose -f deploy/deca/docker-compose.yml --env-file /etc/deca-soar/deca.env up -d
+# Secrets are files under /etc/deca-soar/secrets (0600 root, 0440 for uid 10001), mounted read-only.
+x-common: &common
+  image: ${DECA_SOAR_IMAGE:?e.g. deca-soar:<git-sha>}
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: {max-size: 50m, max-file: "5"}
+  environment: &env
+    DECA_ENV: production
+    DECA_DB_URL_FILE: /run/secrets/deca_db_url
+    DECA_TOKENIZATION_KEY_FILE: /run/secrets/deca_tokenization_key
+    DECA_VAULT_KEY_FILE: /run/secrets/deca_vault_key
+    DECA_VAULT_KEY_ID: ${DECA_VAULT_KEY_ID:-v1}
+    DECA_INTERNAL_CIDRS: ${DECA_INTERNAL_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8,::1/128,fc00::/7,fe80::/10}
+
+services:
+  deca-migrate:
+    <<: *common
+    restart: "no"
+    command: ["deca-soar", "migrate"]
+    secrets: [deca_db_url, deca_tokenization_key, deca_vault_key]
+    networks: [deca]
+
+  broker:
+    <<: *common
+    command: ["uvicorn", "deca_soar.broker.app:app", "--host", "0.0.0.0", "--port", "8100", "--no-server-header",
+              "--no-access-log"]
+    environment:
+      <<: *env
+      # Reviewed allowlist/catalog for this environment. Broker refuses DECA_ENV=production while the
+      # protected list still holds the repo's RFC5737 placeholders.
+      DECA_POLICY_DIR: /etc/deca-soar/policy
+    volumes:
+      - ${DECA_POLICY_HOST_DIR:?reviewed policy dir}:/etc/deca-soar/policy:ro
+    secrets: [deca_db_url, deca_tokenization_key, deca_vault_key]
+    depends_on:
+      deca-migrate: {condition: service_completed_successfully}
+    ports:
+      - "${DECA_BIND_IP:?private VPC IP of this ECS}:8100:8100"
+    networks: [deca]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8100/healthz',timeout=3)"]
+      interval: 30s
+
+  gateway:
+    <<: *common
+    command: ["uvicorn", "deca_soar.gateway.app:app", "--host", "127.0.0.1", "--port", "8200", "--no-server-header",
+              "--no-access-log"]
+    environment:
+      <<: *env
+      DECA_GATEWAY_SOURCE: ${DECA_GATEWAY_SOURCE:-replay}
+      DECA_REPLAY_FILE: /data/replay/alerts.ndjson
+      DECA_PULL_INTERVAL_S: ${DECA_PULL_INTERVAL_S:-15}
+      DECA_TRACECAT_WEBHOOK_URL_FILE: /run/secrets/deca_tracecat_webhook_url
+      DECA_TRACECAT_WEBHOOK_API_KEY_FILE: /run/secrets/deca_tracecat_webhook_api_key
+    secrets: [deca_db_url, deca_tokenization_key, deca_vault_key, deca_tracecat_webhook_url,
+              deca_tracecat_webhook_api_key]
+    volumes:
+      - ${DECA_REPLAY_DIR:?directory with alerts.ndjson}:/data/replay:ro
+    depends_on:
+      deca-migrate: {condition: service_completed_successfully}
+    networks: [deca]
+
+networks:
+  deca: {}
+
+secrets:
+  deca_db_url: {file: /etc/deca-soar/secrets/deca_db_url}
+  deca_tokenization_key: {file: /etc/deca-soar/secrets/deca_tokenization_key}
+  deca_vault_key: {file: /etc/deca-soar/secrets/deca_vault_key}
+  deca_tracecat_webhook_url: {file: /etc/deca-soar/secrets/deca_tracecat_webhook_url}
+  deca_tracecat_webhook_api_key: {file: /etc/deca-soar/secrets/deca_tracecat_webhook_api_key}

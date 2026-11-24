@@ -1,0 +1,43 @@
+# DECA phase 0: tokenised alert from the ingest gateway (webhook) -> triage -> action broker (shadow).
+# Import: Tracecat UI "Import workflow" or POST /workflows (file). Needs workspace secret `deca_broker`
+# with keys URL (e.g. http://10.x.x.x:8100) and TOKEN (a broker service principal, role analyst).
+# Triage is a deterministic MOCK decision (source=rule). The LLM step is not wired in phase 0 and is untested.
+definition:
+  title: DECA alert shadow
+  description: Gateway alert -> mock triage -> broker request (shadow-only); the broker validates and ledgers.
+  entrypoint:
+    ref: triage
+  actions:
+    - ref: triage
+      action: core.transform.reshape
+      args:
+        value:
+          verdict: malicious
+          confidence: 0.95
+          source: rule
+          rationale_summary: "phase-0 mock triage; LLM not tested"
+          evidence_refs:
+            - ${{ TRIGGER.entities.src_ip }}
+          deterministic_signals:
+            rule_id: ${{ TRIGGER.rule_id }}
+            events: ${{ TRIGGER.counts.events }}
+            severity_hint: ${{ TRIGGER.severity_hint }}
+
+    - ref: request_block
+      action: core.http_request
+      depends_on:
+        - triage
+      args:
+        url: ${{ SECRETS.deca_broker.URL }}/v1/actions/requests
+        method: POST
+        timeout: 10
+        headers:
+          Authorization: Bearer ${{ SECRETS.deca_broker.TOKEN }}
+        payload:
+          alert_id: ${{ TRIGGER.alert_id }}
+          action: waf.ip_blacklist.add
+          params:
+            ip_token: ${{ TRIGGER.entities.src_ip }}
+            waf_instance: waf-jkt-01
+          decision: ${{ ACTIONS.triage.result }}
+          idempotency_key: tc-${{ TRIGGER.alert_id }}

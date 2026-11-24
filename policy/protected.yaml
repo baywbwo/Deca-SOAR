@@ -1,0 +1,12 @@
+# Protected targets (design 6.3): the broker never acts on these, whatever the alert or the LLM says.
+# Entries marked `placeholder: true` are documentation ranges (RFC 5737) used by tests only.
+# The broker refuses to start with DECA_ENV=production while any placeholder remains (fill in phase 1).
+version: 1
+ip_cidrs:
+  - cidr: 198.51.100.0/24
+    label: "PLACEHOLDER bank mitra / switching (isi daftar nyata di Fase 1)"
+    placeholder: true
+  - cidr: 192.0.2.0/24
+    label: "PLACEHOLDER IP egress/NAT DECA dan kantor (isi di Fase 1)"
+    placeholder: true
+principals: []
