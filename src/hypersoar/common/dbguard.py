@@ -27,6 +27,7 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
         "gateway.case_key": {"SELECT", "INSERT", "UPDATE"},
         "gateway.entity_relation": {"SELECT", "INSERT", "UPDATE"},
         "gateway.case_step": {"SELECT", "INSERT", "UPDATE"},
+        "broker.case_close_request": {"SELECT"},
         "vault.token_map": {"INSERT"},
         "ledger.entry": {"SELECT"},
         "public.hypersoar_install": {"SELECT"},
@@ -45,6 +46,8 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
         "broker.integration_call": {"SELECT", "INSERT"},
         "broker.integration_config_version": {"SELECT", "INSERT"},
         "broker.integration_test_run": {"SELECT", "INSERT"},
+        "broker.case_close_request": {"SELECT", "INSERT"},
+        "broker.integration_outbox": {"SELECT", "INSERT", "UPDATE"},
         "broker.jira_issue": {"SELECT", "INSERT", "UPDATE"},
         "broker.integration_config": {"SELECT", "INSERT", "UPDATE"},
         "broker.integration_secret": {"SELECT", "INSERT", "UPDATE"},
@@ -73,6 +76,8 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
         "broker.integration_config_version": {"SELECT"},
         "broker.integration_test_run": {"SELECT"},
         "broker.ai_usage": {"SELECT"},
+        "broker.integration_outbox": {"SELECT"},
+        "broker.case_close_request": {"SELECT"},
         "qa.scenario_run": {"SELECT"},
         "ledger.entry": {"SELECT"},
         "public.hypersoar_install": {"SELECT"},
@@ -88,7 +93,8 @@ LEDGER_INSERT_COLUMNS = (
 # service -> {(table, column, privilege)} granted per column (migrations 0002 and 0003), on top of EXPECTED.
 EXPECTED_COLUMNS: dict[str, set[tuple[str, str, str]]] = {
     "gateway": {("vault.token_map", "token", "SELECT")}
-               | {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
+               | {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS}
+               | {("broker.case_close_request", "applied_at", "UPDATE")},
     "broker": {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
     "auditor": set(),
     "console": {("broker.integration_secret", c, "SELECT") for c in (

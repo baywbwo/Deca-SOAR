@@ -124,6 +124,51 @@ def cmd_synth_alerts(a: argparse.Namespace) -> int:
     return 0
 
 
+def _integration_ctx(need_box: bool):
+    from hypersoar.broker.integrations import config as int_config
+    from hypersoar.broker.integrations import secretbox
+    from hypersoar.common import entity as entity_mod
+
+    mode = entity_mod.current_mode()
+    ent = entity_mod.load(mode=mode)
+    box = secretbox.SecretBox.from_env()
+    if box is None and (need_box or mode == "production"):
+        raise ConfigError("HYPERSOAR_INTEGRATION_KEY_FILE is required")
+    with psycopg.connect(_db_url(), row_factory=dict_row) as conn, conn.transaction():
+        entity_mod.assert_install(conn, mode, ent.id)
+        int_config.seed(conn, ent)
+    return mode, ent, box
+
+
+def cmd_integration_set_secret(a: argparse.Namespace) -> int:
+    """Read one integration secret on stdin and seal it. Prints only the name and the time."""
+    from hypersoar.broker.integrations import secretbox
+
+    mode, ent, box = _integration_ctx(need_box=True)
+    value = sys.stdin.readline().rstrip("\n")
+    if not value:
+        print("empty secret on stdin", file=sys.stderr)
+        return 2
+    with psycopg.connect(_db_url(), row_factory=dict_row) as conn, conn.transaction():
+        secretbox.set_secret(conn, box, ent.id, a.integration, mode, a.name, value, f"cli:{a.actor}")
+    print(json.dumps({"entity": ent.id, "mode": mode, "integration": a.integration, "secret": a.name, "set": True}))
+    return 0
+
+
+def cmd_integration_test(a: argparse.Namespace) -> int:
+    from hypersoar.broker.integrations.hub import Hub
+
+    mode, ent, box = _integration_ctx(need_box=False)
+    hub = Hub(entity=ent, mode=mode, box=box)
+    names = (a.integration,) if a.integration else ("lark", "jira", "ai")
+    rc = 0
+    for n in names:
+        r = hub.test(lambda: psycopg.connect(_db_url(), row_factory=dict_row), n, f"cli:{a.actor}")
+        print(json.dumps(r))
+        rc |= r["status"] != "pass"
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="hypersoar")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -153,6 +198,17 @@ def main(argv: list[str] | None = None) -> int:
     sa.add_argument("--count", type=int, default=0, help="stop after this many alerts (0 = run forever)")
     sa.add_argument("--seed", type=int, default=None)
     sa.set_defaults(fn=cmd_synth_alerts)
+    ig = sub.add_parser("integration", help="Lark / Jira / 9router: seal a secret or run a connection test")
+    isub = ig.add_subparsers(dest="icmd", required=True)
+    ss = isub.add_parser("set-secret", help="read the secret value from stdin")
+    ss.add_argument("--integration", choices=("lark", "jira", "ai"), required=True)
+    ss.add_argument("--name", required=True)
+    ss.add_argument("--actor", required=True, help="who is doing this (recorded in the ledger)")
+    ss.set_defaults(fn=cmd_integration_set_secret)
+    it = isub.add_parser("test", help="run the connection test; exit 1 unless every test passes")
+    it.add_argument("--integration", choices=("lark", "jira", "ai"))
+    it.add_argument("--actor", required=True)
+    it.set_defaults(fn=cmd_integration_test)
     a = ap.parse_args(argv)
     return a.fn(a)
 

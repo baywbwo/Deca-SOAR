@@ -4,6 +4,7 @@ dev server is started on loopback. Nothing here talks to a real broker; the e2e 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
@@ -76,6 +77,41 @@ def test_triage_mock_and_request_shape():
     assert req["idempotency_key"] == f"wf-{a['alert_id']}"
     assert build_request(_alert(source="actiontrail"), d) is None
     assert build_request(_alert(entities={"src_ip": None}), d) is None
+    assert set(req["decision"]) <= {"verdict", "confidence", "source", "model", "prompt_version",
+                                    "rationale_summary", "evidence_refs", "deterministic_signals"}
+
+
+def test_build_request_per_case_type():
+    llm = {"verdict": "suspicious", "confidence": 0.8, "source": "llm", "model": "deca-triage-v2",
+           "escalated": None, "fallback_used": False, "case_id": "CS-1001", "waf_instance": "waf-dob-1"}
+    ak = _alert(source="actiontrail", rule_id="actiontrail.ak_unusual_ip",
+                entities={"access_key_token": "tok_ak_0123456789abcdef"})
+    req = build_request(ak, llm)
+    assert req["action"] == "ram.access_key.disable" and req["params"] == {"access_key_token":
+                                                                            "tok_ak_0123456789abcdef"}
+    assert "case_id" not in req["decision"] and "waf_instance" not in req["decision"]
+    waf = build_request(_alert(), {**llm, "verdict": "malicious"})
+    assert waf["params"]["waf_instance"] == "waf-dob-1"
+    for verdict in ("unknown", "benign"):
+        assert build_request(_alert(), {**llm, "verdict": verdict}) is None
+        assert build_request(ak, {**llm, "verdict": verdict}) is None
+    other = _alert(source="actiontrail", rule_id="actiontrail.ram.assume_role_denied",
+                   entities={"access_key_token": "tok_ak_0123456789abcdef"})
+    assert build_request(other, llm) is None
+
+
+def test_triage_activity_sends_only_the_alert_id():
+    seen = []
+
+    def handler(req):
+        seen.append((req.url.path, json.loads(req.content)))
+        return httpx.Response(200, json={"verdict": "unknown", "escalated": "AI answer unusable"})
+
+    s = _submitter(handler)
+    a = _alert()
+    out = asyncio.run(s.triage(a))
+    assert out["verdict"] == "unknown"
+    assert seen == [("/v1/triage", {"alert_id": a["alert_id"]})]
 
 
 def _submitter(handler) -> BrokerSubmitter:

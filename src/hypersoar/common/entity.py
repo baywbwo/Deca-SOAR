@@ -1,6 +1,8 @@
 """Entity config (entities/<id>.yaml): one install per company, sandbox and production targets.
 
-Credentials are never in the file, only the names of files under HYPERSOAR_SECRETS_DIR.
+The integration blocks are only the first version of each integration's settings: the broker copies
+them into broker.integration_config on first start, and screen 08 edits them there. No credential is
+ever in the file; secrets are set write-only through the broker and stored sealed.
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ from hypersoar.common.config import ConfigError
 
 MODES = ("sandbox", "production")
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-SECRET_REF_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 PLACEHOLDER = "REPLACE"
 DEFAULT_ENTITY = "dob"
 
@@ -31,10 +32,6 @@ def current_mode() -> str:
     return mode
 
 
-def secrets_dir() -> Path:
-    return Path(os.environ.get("HYPERSOAR_SECRETS_DIR", "/run/secrets"))
-
-
 @dataclass(frozen=True)
 class Asset:
     name: str
@@ -47,25 +44,8 @@ class Asset:
 @dataclass(frozen=True)
 class Integration:
     name: str
-    mode: str  # mock | live
+    target: str  # mock | live
     settings: dict
-    dispatch: str = "on"  # on | shadow (live only)
-
-    def get(self, key: str, default=None):
-        return self.settings.get(key, default)
-
-    def secret_refs(self) -> dict[str, str]:
-        return {k: v for k, v in self.settings.items() if k.endswith("_file")}
-
-    def read_secret(self, key: str) -> str | None:
-        ref = self.settings.get(key)
-        if not ref:
-            return None
-        try:
-            value = (secrets_dir() / ref).read_text().strip()
-        except OSError:
-            return None
-        return value or None
 
 
 @dataclass(frozen=True)
@@ -96,28 +76,48 @@ class Entity:
         out = [k for k, v in (("alibaba_account", self.alibaba_account), ("waf_instance", self.waf_instance))
                if PLACEHOLDER in v]
         for i in self.integrations.values():
-            out += [f"{i.name}.{k}" for k, v in i.settings.items() if isinstance(v, str) and PLACEHOLDER in v]
+            out += [f"{i.name}.{k}" for k, v in _flat(i.settings) if isinstance(v, str) and PLACEHOLDER in v]
         return out
+
+
+def _flat(d, prefix: str = ""):
+    if isinstance(d, dict):
+        for k, v in d.items():
+            yield from _flat(v, f"{prefix}{k}.")
+    elif isinstance(d, list):
+        for i, v in enumerate(d):
+            yield from _flat(v, f"{prefix}{i}.")
+    else:
+        yield prefix.rstrip("."), d
+
+
+SECRET_KEY_RE = re.compile(r"(token|secret|password|api_key|webhook|encrypt_key|_file)$")
+
+
+def _no_secret_keys(name: str, value, path: str = "") -> None:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if SECRET_KEY_RE.search(str(k)):
+                raise ConfigError(f"entity: {name}.{path}{k} looks like a secret; set it through the broker instead")
+            _no_secret_keys(name, v, f"{path}{k}.")
+    elif isinstance(value, list):
+        for v in value:
+            _no_secret_keys(name, v, path)
 
 
 def _integration(name: str, raw: dict, mode: str) -> Integration:
     if not isinstance(raw, dict):
         raise ConfigError(f"entity: targets.{mode}.{name} must be a mapping")
-    im = raw.get("mode")
-    if im not in ("mock", "live"):
-        raise ConfigError(f"entity: {name}.mode must be mock or live")
-    if mode == "production" and im != "live":
+    target = raw.get("target")
+    if target not in ("mock", "live"):
+        raise ConfigError(f"entity: {name}.target must be mock or live")
+    if mode == "production" and target != "live":
         raise ConfigError(f"entity: production {name} cannot be a mock")
-    dispatch = raw.get("dispatch", "on")
-    if dispatch not in ("on", "shadow"):
-        raise ConfigError(f"entity: {name}.dispatch must be on or shadow")
-    for k, v in raw.items():
-        if k.endswith("_file") and not (isinstance(v, str) and SECRET_REF_RE.match(v)):
-            raise ConfigError(f"entity: {name}.{k} must be a secret file name, not a path or a value")
-        if re.search(r"(token|secret|password|api_key|webhook_url)$", k):
-            raise ConfigError(f"entity: {name}.{k} looks like a secret value; use {k}_file")
-    settings = {k: v for k, v in raw.items() if k not in ("mode", "dispatch")}
-    return Integration(name=name, mode=im, settings=settings, dispatch=dispatch)
+    settings = raw.get("settings")
+    if not isinstance(settings, dict):
+        raise ConfigError(f"entity: {name}.settings must be a mapping")
+    _no_secret_keys(name, settings)
+    return Integration(name=name, target=target, settings=settings)
 
 
 def parse(doc: dict, mode: str) -> Entity:

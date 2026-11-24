@@ -161,3 +161,26 @@ def close_idle(conn, entity: Entity) -> list[str]:
     for r in rows:
         ledger.append(conn, "case.closed", ACTOR, {"case_id": r["case_id"], "reason": "idle"}, entity.id)
     return [r["case_id"] for r in rows]
+
+
+def apply_close_requests(conn, entity: Entity) -> list[str]:
+    """Close cases the broker was asked to close from outside (Jira issue moved to Done, flag
+    HYPERSOAR_JIRA_INBOUND). The broker only records the request; the gateway owns case state."""
+    rows = conn.execute(
+        "SELECT r.case_id, r.source, r.external_ref FROM broker.case_close_request r"
+        " WHERE r.entity_id = %s AND r.applied_at IS NULL FOR UPDATE OF r", (entity.id,),
+    ).fetchall()
+    closed = []
+    for r in rows:
+        hit = conn.execute(
+            "UPDATE gateway.alert_case SET status = 'closed', closed_at = now(), close_reason = %s, updated_at = now()"
+            " WHERE entity_id = %s AND case_id = %s AND status = 'open' RETURNING case_id",
+            (f"{r['source']}:done", entity.id, r["case_id"]),
+        ).fetchone()
+        conn.execute("UPDATE broker.case_close_request SET applied_at = now() WHERE entity_id = %s AND case_id = %s"
+                     " AND source = %s", (entity.id, r["case_id"], r["source"]))
+        if hit:
+            ledger.append(conn, "case.closed", ACTOR, {"case_id": r["case_id"], "reason": f"{r['source']}:done",
+                                                        "external_ref": r["external_ref"]}, entity.id)
+            closed.append(r["case_id"])
+    return closed

@@ -18,7 +18,7 @@ import signal
 from temporalio.worker import Worker
 
 from hypersoar.common.config import ConfigError, assert_no_write_credentials, read_secret
-from hypersoar.workflows.activities import BrokerSubmitter, triage_mock
+from hypersoar.workflows.activities import BrokerSubmitter
 from hypersoar.workflows.config import TemporalSettings
 from hypersoar.workflows.shadow import AlertShadowWorkflow
 
@@ -58,7 +58,7 @@ async def run() -> None:
         client,
         task_queue=ts.task_queue,
         workflows=[AlertShadowWorkflow],
-        activities=[triage_mock, broker.submit],
+        activities=[broker.triage, broker.submit],
         max_concurrent_activities=int(os.environ.get("HYPERSOAR_WORKER_MAX_ACTIVITIES", "20")),
     )
     log.info("worker ready: namespace=%s task_queue=%s tls=%s", ts.namespace, ts.task_queue, ts.tls is not None)

@@ -100,7 +100,7 @@ def pull_once(pool: ConnectionPool, source: AlertSource, settings: Settings, *, 
             " ON CONFLICT (source_name) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()",
             (source.name, new_cursor),
         )
-        res.closed = len(cases.close_idle(conn, entity))
+        res.closed = len(cases.close_idle(conn, entity)) + len(cases.apply_close_requests(conn, entity))
         res.cursor = new_cursor
     return res
 

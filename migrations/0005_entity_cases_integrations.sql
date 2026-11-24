@@ -173,7 +173,7 @@ CREATE TABLE broker.jira_issue (
     case_id      text NOT NULL,
     label        text NOT NULL,
     issue_key    text,
-    status       text NOT NULL CHECK (status IN ('pending', 'created', 'error')),
+    status       text NOT NULL CHECK (status IN ('pending', 'created', 'closed', 'error')),
     attempts     integer NOT NULL DEFAULT 0,
     updated_at   timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (entity_id, case_id)
@@ -247,6 +247,40 @@ CREATE TABLE broker.ai_usage (
     PRIMARY KEY (entity_id, day, model)
 );
 
+-- Outbound work for Lark and Jira, written in the same transaction as the event that causes it and
+-- sent afterwards by the broker's sync loop. A crash between the two loses nothing; a failed call
+-- is retried with backoff and ends as 'error' after max attempts.
+CREATE TABLE broker.integration_outbox (
+    outbox_id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    entity_id    text NOT NULL,
+    integration  text NOT NULL CHECK (integration IN ('jira', 'lark')),
+    operation    text NOT NULL CHECK (operation ~ '^[a-z_.]{1,40}$'),
+    case_id      text,
+    request_id   uuid,
+    payload      jsonb NOT NULL DEFAULT '{}',
+    status       text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'error')),
+    attempts     integer NOT NULL DEFAULT 0,
+    next_at      timestamptz NOT NULL DEFAULT now(),
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    done_at      timestamptz
+);
+CREATE INDEX integration_outbox_due_idx ON broker.integration_outbox (next_at) WHERE status = 'pending';
+
+-- Inbound "issue moved to Done in Jira" (flag HYPERSOAR_JIRA_INBOUND, off). The broker only records
+-- the request; the gateway, which owns cases, applies it on its next pull.
+CREATE TABLE broker.case_close_request (
+    entity_id     text NOT NULL,
+    case_id       text NOT NULL,
+    source        text NOT NULL CHECK (source IN ('jira')),
+    external_ref  text NOT NULL,
+    requested_at  timestamptz NOT NULL DEFAULT now(),
+    applied_at    timestamptz,
+    PRIMARY KEY (entity_id, case_id, source)
+);
+
+-- Who approved from Lark: the Lark user id on the ladder (there is no broker principal for them).
+ALTER TABLE broker.action_request ADD COLUMN approver_ref text;
+
 -- What an approver sees: impact, rollback and evidence, frozen when the request is made.
 ALTER TABLE broker.action_request ADD COLUMN impact text;
 ALTER TABLE broker.action_request ADD COLUMN rollback_plan text;
@@ -280,12 +314,15 @@ GRANT SELECT ON public.hypersoar_install TO deca_soar_gateway, deca_soar_broker,
 GRANT SELECT, INSERT, UPDATE ON gateway.alert_case, gateway.case_alert, gateway.case_key,
     gateway.entity_relation, gateway.case_step TO deca_soar_gateway;
 GRANT INSERT (entity_id) ON ledger.entry TO deca_soar_gateway;
+GRANT USAGE ON SCHEMA broker TO deca_soar_gateway;
+GRANT SELECT ON broker.case_close_request TO deca_soar_gateway;
+GRANT UPDATE (applied_at) ON broker.case_close_request TO deca_soar_gateway;
 
 GRANT SELECT ON gateway.alert_case, gateway.case_alert, gateway.case_step, gateway.entity_relation
     TO deca_soar_broker;
-GRANT SELECT, INSERT ON broker.integration_call, broker.integration_config_version, broker.integration_test_run
-    TO deca_soar_broker;
-GRANT SELECT, INSERT, UPDATE ON broker.jira_issue, broker.integration_config, broker.integration_secret,
+GRANT SELECT, INSERT ON broker.integration_call, broker.integration_config_version, broker.integration_test_run,
+    broker.case_close_request TO deca_soar_broker;
+GRANT SELECT, INSERT, UPDATE ON broker.integration_outbox, broker.jira_issue, broker.integration_config, broker.integration_secret,
     broker.ai_usage TO deca_soar_broker;
 GRANT USAGE ON SCHEMA qa TO deca_soar_broker;
 GRANT SELECT, INSERT ON qa.scenario_run TO deca_soar_broker;
@@ -294,8 +331,8 @@ GRANT INSERT (entity_id) ON ledger.entry TO deca_soar_broker;
 GRANT USAGE ON SCHEMA qa TO deca_soar_viewer;
 GRANT SELECT ON gateway.alert_case, gateway.case_alert, gateway.case_key, gateway.entity_relation,
     gateway.case_step, broker.integration_call, broker.jira_issue, broker.integration_config,
-    broker.integration_config_version, broker.integration_test_run, broker.ai_usage, qa.scenario_run
-    TO deca_soar_viewer;
+    broker.integration_config_version, broker.integration_test_run, broker.ai_usage, qa.scenario_run,
+    broker.integration_outbox, broker.case_close_request TO deca_soar_viewer;
 -- The console sees whether a secret is set and when it was rotated, never the sealed value.
 GRANT SELECT (entity_id, integration, mode, name, key_id, rotated_at, rotated_by, expires_at)
     ON broker.integration_secret TO deca_soar_viewer;
