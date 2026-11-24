@@ -2,8 +2,8 @@
 #   docker build -f deploy/deca/Dockerfile \
 #     --build-arg BASE_IMAGE=python:3.12-slim-bookworm@sha256:<digest> -t deca-soar:<git-sha> .
 # The base image must be pinned by digest (review N3): the build stops if BASE_IMAGE still carries
-# the placeholder, and scripts/preflight.py --production fails on it too. Record the digest used in
-# deploy/deca/image.env (see RUNBOOK section 5).
+# the placeholder, and scripts/preflight.py --production fails on it too. Record the digest used as
+# DECA_BASE_IMAGE in /etc/deca-soar/deca.env (RUNBOOK section 5).
 ARG BASE_IMAGE=python:3.12-slim-bookworm@sha256:REPLACE_WITH_PINNED_DIGEST
 
 FROM ${BASE_IMAGE} AS build
