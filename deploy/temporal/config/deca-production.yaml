@@ -106,7 +106,9 @@ services:
             grpcPort: {{ default "7233" (env "FRONTEND_GRPC_PORT") }}
             membershipPort: 6933
             bindOnIP: {{ env "BIND_ON_IP" | quote }}
-            httpPort: {{ default "7243" (env "FRONTEND_HTTP_PORT") }}
+            # HTTP API off (review N5): 0 means the frontend never opens its HTTP/JSON listener, so the
+            # only client port is the mTLS gRPC one above. Not configurable on purpose.
+            httpPort: 0
     matching:
         rpc:
             grpcPort: 7235
@@ -134,7 +136,6 @@ clusterMetadata:
             initialFailoverVersion: 1
             rpcName: frontend
             rpcAddress: "{{ env "BIND_ON_IP" }}:{{ default "7233" (env "FRONTEND_GRPC_PORT") }}"
-            httpAddress: "{{ env "BIND_ON_IP" }}:{{ default "7243" (env "FRONTEND_HTTP_PORT") }}"
 
 dcRedirectionPolicy:
     policy: noop

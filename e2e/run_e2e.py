@@ -370,6 +370,48 @@ def start_temporal(st: Stack, pki: PKI, tenv: dict, summary: dict) -> dict:
     return op
 
 
+def listening_ports(pgid: int) -> set[int]:
+    """TCP ports in LISTEN state held by any process of one process group (read from /proc, no tools)."""
+    inodes: set[str] = set()
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            if int((d / "stat").read_text().rsplit(")", 1)[1].split()[2]) != pgid:
+                continue
+            for fd in (d / "fd").iterdir():
+                link = os.readlink(fd)
+                if link.startswith("socket:["):
+                    inodes.add(link[8:-1])
+        except (OSError, ValueError, IndexError):
+            continue
+    ports: set[int] = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        for line in Path(table).read_text().splitlines()[1:]:
+            f = line.split()
+            if f[3] == "0A" and f[9] in inodes:
+                ports.add(int(f[1].rsplit(":", 1)[1], 16))
+    return ports
+
+
+def temporal_http_probe(st: Stack, summary: dict) -> None:
+    """Review N5: the frontend HTTP API stays closed even though FRONTEND_HTTP_PORT is set in its env."""
+    proc = next(p for n, p in st.procs if n == "temporal-server")
+    ports = listening_ports(os.getpgid(proc.pid))
+    expected = {st.ports["temporal"], 7234, 7235, 7239, 6933, 6934, 6935, 6939}
+    http_port = st.ports["temporal_http"]
+    refused = {}
+    for port in (http_port, 7243):
+        try:
+            httpx.get(f"http://{HOST}:{port}/api/v1/namespaces", timeout=3)
+            refused[port] = False
+        except httpx.ConnectError:
+            refused[port] = True
+    summary["temporal_listeners"] = sorted(ports)
+    summary["checks"]["temporal_frontend_http_api_closed"] = (
+        bool(ports) and ports <= expected and http_port not in ports and 7243 not in ports and all(refused.values()))
+
+
 def temporal_cli(op: dict, *args: str) -> subprocess.CompletedProcess:
     tls = ["--address", op["TEMPORAL_ADDRESS"], "--tls-cert-path", op["TEMPORAL_TLS_CERT"], "--tls-key-path",
            op["TEMPORAL_TLS_KEY"], "--tls-ca-path", op["TEMPORAL_TLS_CA"], "--tls-server-name",
@@ -475,6 +517,47 @@ def setup_deca(st: Stack, pki: PKI, pg: dict) -> dict:
     }
 
 
+def guard_probes(st: Stack, denv: dict, summary: dict) -> None:
+    """Review N4/N7: services refuse a DSN with more privilege than they need; apps cannot pick ledger seq."""
+    urls = denv["urls"]
+    port = free_port()
+
+    def serve(app: str, env: dict) -> subprocess.CompletedProcess:
+        return subprocess.run([str(DECA_PY), "-m", "uvicorn", app, "--host", HOST, "--port", str(port)],
+                              env=env, cwd=REPO, capture_output=True, text=True, timeout=60)
+
+    def refused(r: subprocess.CompletedProcess) -> bool:
+        return r.returncode != 0 and "refusing to start" in (r.stdout + r.stderr)
+
+    out = {
+        "broker_with_owner_dsn": refused(serve("deca_soar.broker.app:app",
+                                               {**denv["broker"], "DECA_DB_URL_FILE": str(urls["owner"])})),
+        "broker_with_gateway_dsn": refused(serve("deca_soar.broker.app:app",
+                                                 {**denv["broker"], "DECA_DB_URL_FILE": str(urls["gateway"])})),
+        "gateway_with_owner_dsn": refused(serve("deca_soar.gateway.app:app",
+                                                {**denv["gateway"], "DECA_DB_URL_FILE": str(urls["owner"])})),
+        "gateway_with_broker_dsn": refused(serve("deca_soar.gateway.app:app",
+                                                 {**denv["gateway"], "DECA_DB_URL_FILE": str(urls["broker"])})),
+    }
+    anchors = st.run / "anchors-guard.ndjson"
+    r = deca_cli(st, {**denv["auditor"], "DECA_DB_URL_FILE": str(urls["owner"])}, "anchor-ledger", "--sink",
+                 f"file:{anchors}", ok=(2,))
+    out["anchor_with_owner_dsn"] = r["rc"] == 2 and not anchors.exists()
+    summary["db_login_guard"] = out
+    summary["checks"]["services_refuse_overprivileged_db_login"] = all(out.values())
+
+    seq = {}
+    for who in ("gateway", "broker"):
+        with psycopg.connect(Path(urls[who]).read_text().strip(), autocommit=True) as c:
+            try:
+                c.execute("INSERT INTO ledger.entry (seq, event_type, actor, payload, canonical, prev_hash, hash)"
+                          " VALUES (999999, 'x', 'x', '{}', '{}', repeat('0', 64), repeat('f', 64))")
+                seq[who] = False
+            except psycopg.errors.InsufficientPrivilege:
+                seq[who] = True
+    summary["checks"]["app_roles_cannot_insert_ledger_seq"] = all(seq.values())
+
+
 def owner_conn(denv: dict) -> psycopg.Connection:
     return psycopg.connect(Path(denv["owner"]["DECA_DB_URL_FILE"]).read_text().strip(), autocommit=True)
 
@@ -492,6 +575,7 @@ def scenario(st: Stack, summary: dict) -> int:
     tenv = temporal_env(st, pki, pg)
     op = start_temporal(st, pki, tenv, summary)
     mtls_probes(st, pki, summary)
+    temporal_http_probe(st, summary)
     denv = setup_deca(st, pki, pg)
     P = st.ports
 
@@ -499,6 +583,7 @@ def scenario(st: Stack, summary: dict) -> int:
     r = subprocess.run([str(DECA_PY), "-m", "deca_soar.cli", "worker"], capture_output=True, text=True, timeout=60,
                        env={**denv["worker"], "DECA_DB_URL_FILE": str(denv["urls"]["broker"])})
     summary["checks"]["worker_refuses_db_credentials"] = r.returncode != 0 and "must not hold" in r.stderr
+    guard_probes(st, denv, summary)
 
     b_cert, b_key = denv["broker_tls"]
     st.start("deca-broker", [str(DECA_PY), "-m", "uvicorn", "deca_soar.broker.app:app", "--host", HOST,

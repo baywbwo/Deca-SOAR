@@ -126,6 +126,8 @@ def static_temporal() -> None:
     check('enabled: {{ default "true" (env "SQL_TLS_ENABLED") }}' in tpl, "temporal config: SQL TLS on by default")
     check("state: enabled" not in tpl, "temporal config: archival disabled")
     check("port: 0" in tpl, "temporal config: pprof disabled")
+    check(re.search(r"^\s*httpPort: 0\s*$", tpl, re.M) is not None and "FRONTEND_HTTP_PORT" not in tpl
+          and "httpAddress" not in tpl, "temporal config: frontend HTTP API off (httpPort 0, not overridable; N5)")
     check("temporal_cloud" not in tpl.lower() and "tmprl.cloud" not in tpl, "temporal config: no Temporal Cloud")
     example = (TEMPORAL_DIR / "temporal.env.example").read_text()
     check("POSTGRES_PWD" not in example, "temporal env: DB password is not an env-file entry")
@@ -161,6 +163,9 @@ def temporal_binaries(bin_dir: Path) -> None:
     check(run({**RENDER_ENV, "BIND_ON_IP": "0.0.0.0"}).returncode != 0, "temporal config: refuses a wildcard bind")
     check(run({k: v for k, v in RENDER_ENV.items() if k != "TEMPORAL_TLS_CLIENT_CA_CERT"}).returncode != 0,
           "temporal config: refuses to start without the client CA")
+    http_on = run({**RENDER_ENV, "FRONTEND_HTTP_PORT": "7243"}).stdout
+    check(set(re.findall(r"httpPort: (\d+)", out)) == {"0"} == set(re.findall(r"httpPort: (\d+)", http_on)),
+          "temporal config (rendered): frontend httpPort 0 even with FRONTEND_HTTP_PORT set (N5)")
     check("systemWorker:" in out and "certFile: /sw.pem" in out, "temporal config (rendered): system worker uses mTLS")
     dc = subprocess.run([str(server), "validate-dynamic-config", str(TEMPORAL_DIR / "dynamicconfig/production.yaml")],
                         capture_output=True, text=True, timeout=60)
