@@ -7,20 +7,21 @@
   <p class="banner" id="error" role="alert" hidden></p>
   <section class="pnl cut ksbig" aria-labelledby="ks-h">
     <div><p class="k">Kill switch</p><p class="state" id="ks-h"><span data-ks-state>–</span></p><p class="k">On stops every automatic action at once. Approvals still queue.</p></div>
-    <div class="pill-row"><button class="btn pri" type="button" disabled data-ks-btn>Turn on kill switch</button><span class="locked">Shadow: writes not active yet</span></div>
+    <div class="pill-row"><button class="btn pri" type="button" disabled data-ks-btn>Turn on kill switch</button><p class="note" id="ks-msg" role="status" aria-live="polite"></p></div>
   </section>
 
   <section class="pnl" aria-labelledby="cat-h">
-    <div class="pnl-h"><h2 id="cat-h">Actions and their automation level</h2><span class="sub" id="cat-sub">From the policy catalog. Every action runs in shadow mode</span></div>
+    <div class="pnl-h"><h2 id="cat-h">Actions and their automation level</h2><span class="sub" id="cat-sub">From the policy catalog. The broker checks every request against it</span></div>
     <div class="table-wrap"><table>
-      <thead><tr><th>Action</th><th>Level</th><th>Mode</th><th>Shadow decisions checked</th><th>Limit</th><th>Last 24 h</th></tr></thead>
+      <thead><tr><th>Action</th><th>Level</th><th>Mode</th><th>Decisions checked</th><th>Limit</th><th>Last 24 h</th></tr></thead>
       <tbody id="acts"></tbody></table></div>
   </section>
 
   <div class="cols c-1-1">
     <section class="pnl"><div class="pnl-h"><h2>Actions with an expiry</h2><span class="sub">Removed automatically when time runs out</span></div>
       <div id="ttl"></div>
-      <p class="pnl-b k">In shadow mode these are what the broker would have done. Nothing is applied to the WAF.</p>
+      <p class="note pnl-b" id="ttl-msg" role="status" aria-live="polite"></p>
+      <p class="pnl-b k">Revoke ends an action before its expiry. No cloud executor is connected yet, so these are recorded, not applied to the WAF.</p>
     </section>
     <section class="pnl"><div class="pnl-h"><h2>Integrations</h2></div>
       <ul class="integ" id="integ"></ul></section>

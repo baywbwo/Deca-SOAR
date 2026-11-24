@@ -4,7 +4,8 @@
 #   gateway -> no inbound port (pull-only); health on loopback inside the container
 #   worker  -> no inbound port; talks to Temporal (mTLS) and the broker (https)
 #   docker compose -f deploy/deca/docker-compose.yml --env-file /etc/deca-soar/deca.env up -d
-# Secrets are files under /etc/deca-soar/secrets (0600 root, 0440 for uid 10001), mounted read-only.
+# Secrets are files under /etc/deca-soar/secrets (0600 root, 0440 for uid 10001), mounted read-only;
+# HYPERSOAR_ETC moves the whole directory (the lab runs a sandbox and a production stack side by side).
 # Each process gets only the secrets it needs (review F3/F5): one DB login per role, the gateway has the
 # vault public key only, only the broker has the vault private key, the worker has no DB access at all.
 # The owner DSN is not here and not on the host (review N2): migrations and create-principal run through
@@ -74,13 +75,15 @@ services:
       HYPERSOAR_VAULT_KEY_ID: ${HYPERSOAR_VAULT_KEY_ID:-v2}
       HYPERSOAR_TEMPORAL_TLS_CERT_FILE: /run/secrets/temporal_gateway_cert
       HYPERSOAR_TEMPORAL_TLS_KEY_FILE: /run/secrets/temporal_gateway_key
-      HYPERSOAR_GATEWAY_SOURCE: ${HYPERSOAR_GATEWAY_SOURCE:-replay}
-      HYPERSOAR_REPLAY_FILE: /data/replay/alerts.ndjson
+      # Alerts come only from the data sources configured per mode (webhook, syslog/CEF, Alibaba SLS); the
+      # replay file of synthetic alerts is a sandbox overlay (deploy/lab/docker-compose.sandbox.yml).
+      HYPERSOAR_GATEWAY_SOURCE: connectors
       HYPERSOAR_PULL_INTERVAL_S: ${HYPERSOAR_PULL_INTERVAL_S:-15}
+      # Opens the sealed secrets of data sources (SLS AccessKey, webhook HMAC key). It only reads the
+      # source_config/source_secret views, never Lark/Jira/AI settings.
+      HYPERSOAR_INTEGRATION_KEY_FILE: /run/secrets/deca_integration_key
     secrets: [deca_db_url_gateway, deca_tokenization_key, deca_vault_public_key, deca_temporal_payload_key,
-              temporal_server_ca, temporal_gateway_cert, temporal_gateway_key]
-    volumes:
-      - ${HYPERSOAR_REPLAY_DIR:?directory with alerts.ndjson}:/data/replay:ro
+              deca_integration_key, temporal_server_ca, temporal_gateway_cert, temporal_gateway_key]
 
   worker:
     <<: *common
@@ -113,20 +116,20 @@ networks:
   deca: {}
 
 secrets:
-  deca_db_url_gateway: {file: /etc/deca-soar/secrets/deca_db_url_gateway}
-  deca_db_url_broker: {file: /etc/deca-soar/secrets/deca_db_url_broker}
-  deca_db_url_auditor: {file: /etc/deca-soar/secrets/deca_db_url_auditor}
-  deca_tokenization_key: {file: /etc/deca-soar/secrets/deca_tokenization_key}
-  deca_vault_public_key: {file: /etc/deca-soar/secrets/deca_vault_public_key}
-  deca_vault_private_key: {file: /etc/deca-soar/secrets/deca_vault_private_key}
-  deca_integration_key: {file: /etc/deca-soar/secrets/deca_integration_key}
-  deca_temporal_payload_key: {file: /etc/deca-soar/secrets/deca_temporal_payload_key}
-  deca_broker_worker_token: {file: /etc/deca-soar/secrets/deca_broker_worker_token}
-  broker_tls_cert: {file: /etc/deca-soar/tls/broker.pem}
-  broker_tls_key: {file: /etc/deca-soar/secrets/broker.key}
-  broker_tls_ca: {file: /etc/deca-soar/tls/broker-ca.pem}
-  temporal_server_ca: {file: /etc/deca-soar/tls/temporal-server-ca.pem}
-  temporal_gateway_cert: {file: /etc/deca-soar/tls/temporal-gateway.pem}
-  temporal_gateway_key: {file: /etc/deca-soar/secrets/temporal-gateway.key}
-  temporal_worker_cert: {file: /etc/deca-soar/tls/temporal-worker.pem}
-  temporal_worker_key: {file: /etc/deca-soar/secrets/temporal-worker.key}
+  deca_db_url_gateway: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_db_url_gateway"}
+  deca_db_url_broker: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_db_url_broker"}
+  deca_db_url_auditor: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_db_url_auditor"}
+  deca_tokenization_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_tokenization_key"}
+  deca_vault_public_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_vault_public_key"}
+  deca_vault_private_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_vault_private_key"}
+  deca_integration_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_integration_key"}
+  deca_temporal_payload_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_temporal_payload_key"}
+  deca_broker_worker_token: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_broker_worker_token"}
+  broker_tls_cert: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/tls/broker.pem"}
+  broker_tls_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/broker.key"}
+  broker_tls_ca: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/tls/broker-ca.pem"}
+  temporal_server_ca: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/tls/temporal-server-ca.pem"}
+  temporal_gateway_cert: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/tls/temporal-gateway.pem"}
+  temporal_gateway_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/temporal-gateway.key"}
+  temporal_worker_cert: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/tls/temporal-worker.pem"}
+  temporal_worker_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/temporal-worker.key"}

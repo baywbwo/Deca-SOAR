@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from hypersoar.common.config import ConfigError
 
@@ -72,6 +72,8 @@ class Session:
     user: str
     created: float
     seen: float
+    # Sent back by console.js in X-HyperSoar-CSRF on every write; another site cannot read it.
+    csrf: str = field(default_factory=lambda: secrets.token_urlsafe(32))
 
 
 class SessionStore:

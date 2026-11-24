@@ -1,4 +1,5 @@
-// HyperSoar console v3. Fills the static pages from the read-only /api/* endpoints.
+// HyperSoar console v3. Fills the static pages from /api/*. Writes are JSON POSTs with the session's CSRF
+// token and an Idempotency-Key; the broker behind them checks the role, the password and the policy.
 // CSP is script-src 'self' and style-src 'self': nodes are built with createElement and textContent only,
 // no HTML string parsing, and per-element values go through CSSOM (el.style.x / setProperty), never style="".
 (() => {
@@ -116,6 +117,79 @@
     return run();
   }
 
+  // -- writes ---------------------------------------------------------------------------------------------
+  const newKey = () => crypto.randomUUID();
+  const canWrite = () => !!(shellData && shellData.meta && shellData.meta.writes);
+  // {ok, status, data}. A refused write is a normal answer with a message, not an exception.
+  async function post(path, payload, key) {
+    let r;
+    try {
+      r = await fetch(path, {
+        method: "POST", credentials: "same-origin", cache: "no-store",
+        headers: { "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": key,
+                   "X-HyperSoar-CSRF": shellData && shellData.meta ? shellData.meta.csrf : "" },
+        body: JSON.stringify(payload || {}),
+      });
+    } catch (e) { return { ok: false, status: 0, data: { detail: "network error, try again" } }; }
+    if (r.status === 401) { location.assign("/login"); throw new LoginRequired("login required"); }
+    let data = {};
+    try { data = await r.json(); } catch (e) { data = {}; }
+    return { ok: r.ok, status: r.status, data };
+  }
+  const why = res => {
+    const d = res.data && res.data.detail;
+    return typeof d === "string" ? d : `answered ${res.status}`;
+  };
+  function say(id, msg, bad) {
+    const e = byId(id);
+    if (!e) return;
+    e.textContent = msg || "";
+    e.className = bad ? "note bad" : "note";
+  }
+  // A write that needs the password again (approve, reject, kill switch, revoke). One dialog, one key per
+  // opening: a double click or a retry after a network error is the same write.
+  function confirmWrite(o) {
+    const pw = el("input", { type: "password", id: "rw-pw", name: "password", autocomplete: "current-password", required: true, maxlength: 1024 });
+    const reason = el("textarea", { id: "rw-reason", name: "reason", rows: 3, maxlength: 500, required: o.reasonRequired ? true : null });
+    const err = el("p", { class: "err", role: "alert" });
+    const ok = el("button", { class: "btn pri", type: "submit", text: o.confirm });
+    const cancel = el("button", { class: "btn ghost", type: "button", text: "Cancel" });
+    const form = el("form", { class: "gate-form", novalidate: true },
+      el("h2", { class: "h2", id: "rw-h", text: o.title }), o.text ? el("p", { class: "k", text: o.text }) : null,
+      el("label", { for: "rw-reason", text: o.reasonRequired ? "Reason (required, kept in the audit trail)" : "Reason (optional, kept in the audit trail)" }), reason,
+      el("label", { for: "rw-pw", text: "Your password, to confirm it is you" }), pw, err,
+      el("div", { class: "pill-row" }, ok, cancel));
+    const dlg = el("dialog", { class: "rw", "aria-labelledby": "rw-h" }, form);
+    body.append(dlg);
+    const key = newKey();
+    cancel.addEventListener("click", () => dlg.close());
+    dlg.addEventListener("close", () => dlg.remove());
+    form.addEventListener("submit", async ev => {
+      ev.preventDefault();
+      const r = reason.value.trim();
+      if (o.reasonRequired && r.length < 3) { err.textContent = "Write a reason of at least 3 characters."; reason.focus(); return; }
+      if (!pw.value) { err.textContent = "Type your password."; pw.focus(); return; }
+      ok.disabled = true;
+      err.textContent = "";
+      const payload = { ...o.body, password: pw.value };
+      if (r) payload.reason = r;
+      try {
+        const res = await post(o.path, payload, key);
+        if (res.ok) { dlg.close(); o.done(res); return; }
+        err.textContent = res.status === 403 && /re-authentication/.test(why(res)) ? "Wrong password." : why(res);
+        pw.value = "";
+        pw.focus();
+      } finally { ok.disabled = false; }
+    });
+    dlg.showModal();
+    (o.reasonRequired ? reason : pw).focus();
+  }
+  // A plain write (assign, status, comment, ask AI): the button is disabled while it runs.
+  async function quickWrite(btn, path, payload, key) {
+    if (btn) btn.disabled = true;
+    try { return await post(path, payload, key || newKey()); } finally { if (btn) btn.disabled = false; }
+  }
+
   // -- shell: header, mode bar, footer --------------------------------------------------------------------
   let shellData = null;
   const TABS = [
@@ -134,7 +208,7 @@
     sv("rect", { x: 7, y: 12.5, width: 21, height: 2.4, fill: "#f4f4f4" }, mark);
     const header = el("header", { class: "top" },
       el("a", { class: "brand", href: "/", "aria-label": "HyperSoar home" }, mark, el("span", { class: "word", text: "HyperSoar" })),
-      el("nav", { class: "tabs", "aria-label": "Screens" }, TABS.map(([id, label, href, cnt, cls]) =>
+      el("nav", { class: "tabs", "aria-label": "Screens" }, TABS.filter(t => !(t[4] === "sbx-only" && body.classList.contains("prod"))).map(([id, label, href, cnt, cls]) =>
         el("a", { href, class: cls, "aria-current": id === screen ? "page" : null }, label,
           cnt ? el("span", { class: "cnt", id: cnt }) : null))),
       el("div", { class: "top-r" },
@@ -147,9 +221,9 @@
       el("span", { class: "slice", "aria-hidden": "true" }),
       el("span", { class: "entity", id: "entity", text: "–" }), el("span", { class: "sep" }),
       el("span", { class: "env sbx sbx-only", text: "Sandbox" }), el("span", { class: "env prd prd-only", text: "Production" }),
-      el("strong", { text: "Shadow mode" }),
-      el("span", { class: "sbx-only mtx", text: "Seeding bot is generating attacks. The broker decides, nothing is executed." }),
-      el("span", { class: "prd-only mtx", text: "Live data. The broker decides, nothing is executed until N1 ships." }),
+      el("strong", { text: "Decisions are live" }),
+      el("span", { class: "sbx-only mtx", text: "Seeding bot is generating attacks. Approvals and changes are recorded in the audit trail." }),
+      el("span", { class: "prd-only mtx", text: "Approvals and changes are recorded in the audit trail. No cloud executor is connected yet." }),
       el("span", { class: "sp" }),
       el("span", { class: "kill", id: "kill", text: "Kill switch –" }));
     body.prepend(header, mode);
@@ -176,7 +250,11 @@
     body.classList.toggle("killed", killed);
     txt("kill", killed ? "Kill switch ON · all automatic actions stopped" : "Kill switch off");
     document.querySelectorAll("[data-ks-state]").forEach(e => { e.textContent = killed ? "On" : "Off"; });
-    document.querySelectorAll("[data-ks-btn]").forEach(e => { e.textContent = killed ? "Turn off kill switch" : "Turn on kill switch"; });
+    document.querySelectorAll("[data-ks-btn]").forEach(e => {
+      e.textContent = killed ? "Turn off kill switch" : "Turn on kill switch";
+      e.disabled = !canWrite();
+      e.title = canWrite() ? "" : "Writes are not configured on this console";
+    });
     txt("entity", s.entity ? s.entity.name : s.entity_id || "No entity configured");
     txt("who", s.meta ? s.meta.user : "");
     const cnt = (id, v, hot) => { const e = txt(id, v); if (e) e.className = hot ? "cnt hot" : "cnt"; };
@@ -195,7 +273,8 @@
   const refreshShell = async () => applyShell(await api("/api/shell"));
 
   // -- integrations list (overview, automation) -----------------------------------------------------------
-  const INTEG = { lark: ["LK", "Lark"], jira: ["JR", "Jira"], ai: ["9R", "9router AI DECA"] };
+  const INTEG = { lark: ["LK", "Lark"], jira: ["JR", "Jira"], ai: ["9R", "9router AI DECA"], webhook: ["WH", "Webhook source"],
+    syslog: ["SY", "Syslog / CEF source"], sls: ["AC", "Alibaba Cloud SLS"] };
   const HEALTH = { healthy: ["ok", "Healthy"], error: ["hot", "Errors"], untested: ["wait", "Not tested"], off: ["", "Off"] };
   function integItems(list, long) {
     const items = (list || []).map(i => {
@@ -211,13 +290,7 @@
         el("span", { class: "r" }, el("span", { class: `tag ${cls}`, text: label }),
           i.target === "mock" ? el("span", { class: "code sbx-only", text: i.name === "ai" ? "mock model" : "mock endpoint" }) : null));
     });
-    if (!items.length) items.push(el("li", {}, el("span", { class: "d", text: "No integration configured for this install." })));
-    if (long) {
-      items.push(el("li", {}, el("span", { class: "logo", text: "AC" }), el("span", { class: "nm", text: "Alibaba Cloud · SLS, ActionTrail, WAF" }),
-        el("span", { class: "d" }, el("span", { class: "sbx-only", text: "Replaced by the seeding bot in sandbox" }),
-          el("span", { class: "prd-only", text: "Read only. WAF writes go through the broker." })),
-        el("span", { class: "r" }, el("span", { class: "tag ok sbx-only", text: "Seeding bot" }), el("span", { class: "tag prd-only", text: "Read only" }))));
-    }
+    if (!items.length) items.push(el("li", {}, el("span", { class: "d", text: "No integration configured for this install. Set one up with hypersoar integration." })));
     return items;
   }
 
@@ -440,8 +513,9 @@
       : el("span", { class: "k", text: "No verdict yet" });
   }
   const BROKER = {
-    pending_approval: ["wait", "Needs approval"], validated: ["act", "Passed policy, shadow"], rejected: ["hot", "Blocked by policy"],
+    pending_approval: ["wait", "Needs approval"], validated: ["act", "Passed policy"], rejected: ["hot", "Blocked by policy"],
     executed: ["ok", "Executed"], expired: ["", "Expired"], approved: ["ok", "Approved"], denied: ["", "Rejected"],
+    rolled_back: ["", "Revoked"],
   };
   function brokerTag(b) {
     if (!b) return el("span", { class: "k", text: "–" });
@@ -468,7 +542,7 @@
       txt("r-alerts", n(s.alerts_1h));
       const max = Math.max(1, s.events_24h, s.alerts_24h);
       fill("flow", flow("Log events", s.events_24h, max), flow("Alerts after dedup", s.alerts_24h, max),
-        flow("Cases opened", s.cases_24h, max), flow("Broker decisions, shadow", s.decisions_24h, max),
+        flow("Cases opened", s.cases_24h, max), flow("Broker decisions", s.decisions_24h, max),
         flow("Blocked by policy", s.blocked_24h, max, s.blocked_24h ? "hot" : "zero"), flow("Executed", s.executed_24h, max));
       drawChart(o.timeline);
       fill("ov-cases", o.open_cases.length ? o.open_cases.map(c => el("tr", {},
@@ -618,8 +692,9 @@
     const pend = d.requests.some(r => r.status === "pending_approval");
     txt("c-id", c.case_id);
     fill("c-pills", el("span", { class: "eyebrow mono", id: "c-id", text: c.case_id }), sevTag(c.p, c.severity),
-      c.status === "closed" ? el("span", { class: "tag", text: `Closed${c.close_reason ? ` · ${c.close_reason}` : ""}` })
-        : pend ? el("span", { class: "tag wait", text: "Waiting for approval" }) : el("span", { class: "tag", text: "Open" }),
+      c.status === "closed" ? el("span", { class: "tag", text: `Closed${c.close_reason ? ` · ${clip(c.close_reason, 40)}` : ""}` })
+        : pend ? el("span", { class: "tag wait", text: "Waiting for approval" })
+          : c.status === "waiting" ? el("span", { class: "tag wait", text: "Waiting" }) : el("span", { class: "tag", text: "Open" }),
       el("span", { class: "sp" }), el("span", { class: "k", text: "Jira" }), el("span", { class: "mono", text: d.jira ? d.jira.key : "none yet" }),
       el("span", { class: "k", text: "Lark" }), el("span", { class: "mono", text: plural(d.lark.messages, "message") }));
     txt("c-title", c.title);
@@ -632,7 +707,7 @@
     fill("c-score",
       score("Priority", c.p, `${cap(c.severity)} severity × criticality ${c.criticality}`, "v red"),
       score("Alerts in this case", n(c.alerts), `From ${plural(c.sources.length, "source")}: ${c.sources.join(", ")}`, "v num"),
-      score("Time span", `${hm(c.opened_at)} → ${hm(c.closed_at || c.last_seen_at)}`, `${span(spanS)}, ${c.status === "open" ? "still open" : "closed"}`, "v num"),
+      score("Time span", `${hm(c.opened_at)} → ${hm(c.closed_at || c.last_seen_at)}`, `${span(spanS)}, ${c.status === "closed" ? "closed" : "still open"}`, "v num"),
       score("Furthest reach", reached.length ? reached[reached.length - 1].tactic_name || "–" : "–",
         blocked.length ? `${plural(blocked.length, "step")} blocked` : "Nothing blocked"));
 
@@ -701,6 +776,8 @@
     ];
     fill("resp", rows.length ? rows : el("tr", {}, el("td", { colspan: 3, class: "k", text: "No broker decision yet." })));
 
+    renderTriage(d);
+
     const req = d.requests.find(r => r.status === "pending_approval") || d.requests[d.requests.length - 1];
     txt("pol-sub", req ? req.action : "");
     const li = (cls, a, b) => el("li", { class: cls }, el("span", { text: a }), el("span", { class: "v", text: b }));
@@ -713,6 +790,26 @@
           li(null, "AI verdict has evidence and is above 0.80", ai && ai.confidence !== null ? ai.confidence.toFixed(2) : "–"),
           req.level === "L2" || req.level === "L3" ? li(req.status === "pending_approval" ? "pend" : null, `Level ${req.level.slice(1)} needs one human approval`,
             req.status === "pending_approval" ? "waiting" : req.status) : null]);
+  }
+
+  // Assignee, open/waiting/closed and comments of the case on screen.
+  function renderTriage(d) {
+    const c = d.case;
+    const sel = byId("tr-assignee");
+    const names = d.people.includes(c.assignee) || !c.assignee ? d.people : [...d.people, c.assignee];
+    fill(sel, el("option", { value: "", text: "Nobody" }), names.map(p => el("option", { value: p, text: p })));
+    sel.value = c.assignee || "";
+    sel.disabled = !canWrite();
+    document.querySelectorAll("#tr-status button").forEach(b => {
+      b.setAttribute("aria-pressed", String(b.dataset.st === c.status));
+      b.disabled = !canWrite();
+    });
+    txt("tr-sub", c.status_by ? `Status set by ${c.status_by.replace(/^principal:/, "")}` : "");
+    fill("cm", d.comments.length ? d.comments.map(m => el("li", {}, el("span", { class: "tm", text: when(m.at) }),
+      el("span", { class: "au", text: m.author }), el("p", { class: "body", text: m.body })))
+      : el("li", { class: "empty-note", text: "No comment yet." }));
+    const f = byId("cm-form");
+    if (f) $("button", f).disabled = !canWrite();
   }
 
   function cases() {
@@ -754,6 +851,37 @@
       renderCase(d);
     };
     $("[data-replay]").addEventListener("click", () => replay(byId("ap")));
+    const reload = async () => { shown = ""; await loadCase(); await loadList(); };
+    const done = (res, msg) => {
+      say("tr-msg", res.ok ? msg : `Not saved: ${why(res)}`, !res.ok);
+      return reload();
+    };
+    byId("tr-assignee").addEventListener("change", async e => {
+      const id = want();
+      if (!id) return;
+      const who = e.target.value || null;
+      const res = await quickWrite(e.target, `/api/cases/${id}/assign`, { assignee: who });
+      await done(res, who ? `Assigned to ${who}.` : "Unassigned.");
+    });
+    byId("tr-status").addEventListener("click", async e => {
+      const b = e.target.closest("button[data-st]");
+      const id = want();
+      if (!b || !id || b.getAttribute("aria-pressed") === "true") return;
+      const res = await quickWrite(b, `/api/cases/${id}/status`, { status: b.dataset.st });
+      await done(res, `Case is now ${b.dataset.st}.`);
+    });
+    let cmKey = newKey();
+    byId("cm-form").addEventListener("submit", async e => {
+      e.preventDefault();
+      const id = want();
+      const t = byId("cm-body");
+      const text = t.value.trim();
+      if (!id) return;
+      if (!text) { say("tr-msg", "Write a comment first.", true); t.focus(); return; }
+      const res = await quickWrite($("button", e.target), `/api/cases/${id}/comments`, { body: text }, cmKey);
+      if (res.ok) { t.value = ""; cmKey = newKey(); }
+      await done(res, "Comment added.");
+    });
     seg.addEventListener("click", e => {
       const b = e.target.closest("button[data-s]");
       if (!b || b.dataset.s === status) return;
@@ -803,12 +931,15 @@
         curId = null;
         fill("a-pills", el("span", { class: "eyebrow mono", text: "Approvals" }));
         txt("a-title", "Nothing is waiting for approval");
-        txt("a-lede", "Level 2 and 3 actions the broker accepts in shadow mode appear here with a countdown.");
+        txt("a-lede", "Level 2 and 3 actions that pass the broker's policy appear here with a countdown.");
         ["a-score", "a-diff", "chain", "a-ev"].forEach(id => fill(id));
+        ["a-approve", "a-reject", "a-ask"].forEach(id => { byId(id).disabled = true; });
         return;
       }
+      ["a-approve", "a-reject", "a-ask"].forEach(id => { byId(id).disabled = !canWrite(); });
       if (r.id === curId && byId("a-timer")) { timer(); return; }
       curId = r.id;
+      say("a-msg", "");
       fill("a-pills", el("span", { class: "eyebrow mono", text: shortId(r.id) }), el("span", { class: "tag wait", text: "Needs approval" }),
         el("span", { class: "tag lv", text: r.level }), el("span", { class: "sp" }), el("span", { class: "k", text: "From case" }),
         r.case_id ? el("a", { class: "mono", href: `/cases#${r.case_id}`, text: r.case_id }) : el("span", { class: "mono", text: "–" }));
@@ -843,14 +974,56 @@
       fill("a-ev", r.evidence.length ? r.evidence.map(x => el("li", { text: x })) : el("li", { text: "No evidence attached." }));
       timer();
     }
+    const refresh = async () => { data = await api("/api/approvals"); render(); };
+    const decide = approve => {
+      const r = want();
+      if (!r) return;
+      const l3 = r.level === "L3";
+      confirmWrite({
+        title: `${approve ? "Approve" : "Reject"}: ${requestTitle(r)}`,
+        text: approve ? `${l3 ? "Level 3 needs a written reason. " : ""}The decision and your name go into the audit trail. No cloud executor is connected yet, so an approved action is recorded, not applied.`
+          : "The request is closed and nothing is done. The decision goes into the audit trail.",
+        reasonRequired: approve && l3, confirm: approve ? "Approve" : "Reject",
+        path: `/api/approvals/${r.id}/decision`, body: { approve },
+        done: async res => {
+          say("a-msg", `${approve ? "Approved" : "Rejected"} ${shortId(r.id)} (${cap(res.data.status || "")})${res.data.idempotent_replay ? ", already recorded" : ""}.`);
+          history.replaceState(null, "", location.pathname);
+          curId = null;
+          await refresh();
+          await refreshShell();
+        },
+      });
+    };
+    byId("a-approve").addEventListener("click", () => decide(true));
+    byId("a-reject").addEventListener("click", () => decide(false));
+    byId("a-ask").addEventListener("click", async e => {
+      const r = want();
+      if (!r) return;
+      say("a-msg", "Asking the AI to look at the alert again…");
+      const res = await quickWrite(e.currentTarget, `/api/approvals/${r.id}/ask-ai`, {});
+      const v = res.data;
+      say("a-msg", res.ok ? `AI verdict ${v.verdict}${typeof v.confidence === "number" ? ` (${v.confidence.toFixed(2)})` : ""}${v.evidence_refs && v.evidence_refs.length ? `, evidence: ${v.evidence_refs.slice(0, 3).join(", ")}` : ""}.`
+        : `AI triage failed: ${why(res)}`, !res.ok);
+    });
     addEventListener("hashchange", () => { if (data) render(); });
     setInterval(timer, 1000);
-    poll(async () => { data = await api("/api/approvals"); render(); });
+    poll(refresh);
   }
 
   // -- 05 automation --------------------------------------------------------------------------------------
   function automation() {
-    poll(async () => {
+    let load = null;
+    const ksBtn = $("[data-ks-btn]");
+    ksBtn.addEventListener("click", () => {
+      const on = !(shellData && shellData.kill_switch && shellData.kill_switch.global_engaged);
+      confirmWrite({
+        title: on ? "Turn on the kill switch" : "Turn off the kill switch",
+        text: on ? "Every automatic action stops at once. Approvals still queue." : "Automatic actions that pass the policy run again.",
+        reasonRequired: true, confirm: on ? "Turn on" : "Turn off", path: "/api/kill-switch", body: { engaged: on },
+        done: async () => { say("ks-msg", `Kill switch is ${on ? "on" : "off"}.`); await refreshShell(); if (load) await load(); },
+      });
+    });
+    load = async () => {
       const a = await api("/api/automation");
       fill("acts", !a.catalog_loaded ? el("tr", {}, el("td", { colspan: 6, class: "k", text: "The policy catalog could not be loaded. Nothing can run until it is fixed." }))
         : a.actions.map(x => {
@@ -858,10 +1031,10 @@
           const bar = el("span", { class: `lvl${lv >= 2 ? ` l${lv}` : ""}` }, [0, 1, 2, 3].map(i => el("i", { class: i <= lv ? "on" : null })));
           return el("tr", {}, el("td", { class: "mono", text: x.id }),
             el("td", {}, bar, `${x.level_text} `, el("span", { class: "tag lv", text: x.level })),
-            el("td", {}, el("span", { class: "tag", text: "Shadow" }), el("div", { class: "small", text: `target: ${x.target_mode === "approval" ? "with approval" : "automatic"}` })),
-            x.shadow_total ? el("td", {}, el("div", { class: "promo" }, el("span", { class: "bar" }, width(el("i"), x.shadow_validated / x.shadow_total)),
-              el("span", { class: "k", text: `${n(x.shadow_validated)} of ${n(x.shadow_total)} passed policy · ${n(x.shadow_rejected)} blocked` })))
-              : el("td", { class: "k", text: "No shadow decision yet" }),
+            el("td", {}, el("span", { class: "tag", text: x.target_mode === "approval" ? "With approval" : "Automatic" })),
+            x.total ? el("td", {}, el("div", { class: "promo" }, el("span", { class: "bar" }, width(el("i"), x.passed / x.total)),
+              el("span", { class: "k", text: `${n(x.passed)} of ${n(x.total)} passed policy · ${n(x.blocked)} blocked` })))
+              : el("td", { class: "k", text: "No decision yet" }),
             el("td", { class: "mono" }, x.rate_per_hour ? `${x.rate_per_hour} per hour` : "–", x.rollback ? el("div", { class: "small", text: `undo: ${x.rollback}` }) : null),
             el("td", { class: "num", text: n(x.n24) }));
         }));
@@ -869,7 +1042,8 @@
         const total = ms(x.until) - ms(x.from);
         return el("div", { class: "ttl-row" },
           el("span", {}, el("span", { class: "mono", text: x.action }), ` ${x.what || ""} `, el("span", { class: "k", text: `· ${x.case_id || "–"}` })),
-          el("span", { class: "r", text: `expires ${hm(x.until)} ${TZL}` }),
+          el("span", { class: "r" }, `expires ${hm(x.until)} ${TZL} `,
+            el("button", { class: "btn ghost", type: "button", "data-revoke": x.id, disabled: !canWrite(), text: "Revoke" })),
           el("span", { class: "ttlbar" }, width(el("i"), total > 0 ? (ms(x.until) - now()) / total : 0)));
       }) : el("p", { class: "empty-note", text: "No reversible action is active." }));
       fill("integ", integItems(a.integrations, true));
@@ -885,7 +1059,18 @@
       txt("led-hash", l.head_hash || "");
       fill("led", l.tail.map(x => el("li", {}, el("span", { class: "tm", text: `#${x.seq}` }), el("span", { class: "ev", text: x.event_type }),
         el("span", { class: "mono", text: `${hms(x.recorded_at)} · ${x.actor}` }))));
+    };
+    byId("ttl").addEventListener("click", e => {
+      const b = e.target.closest("button[data-revoke]");
+      if (!b) return;
+      const row = b.closest(".ttl-row");
+      confirmWrite({
+        title: "Revoke this action now", text: `${row ? row.firstChild.textContent.trim() : ""}. It ends now instead of at its expiry.`,
+        reasonRequired: true, confirm: "Revoke", path: `/api/requests/${b.dataset.revoke}/revoke`, body: {},
+        done: async () => { say("ttl-msg", "Revoked. Recorded in the audit trail."); await load(); },
+      });
     });
+    poll(load);
   }
 
   // -- 06 scenario tests (sandbox only) -------------------------------------------------------------------
@@ -893,12 +1078,6 @@
     const RES = { pass: ["pass", "PASS"], fail: ["fail", "FAIL"], error: ["fail", "ERROR"] };
     poll(async () => {
       const s = await api("/api/scenarios");
-      if (s.hidden) {
-        const pe = $(".prod-empty");
-        if (pe) pe.classList.remove("prd-only");
-        document.querySelectorAll("main .sbx-only").forEach(e => { e.hidden = true; });
-        return;
-      }
       const run = s.run;
       const failed = run ? run.scenarios.filter(x => x.status !== "pass") : [];
       txt("r-at", run ? hm(run.finished_at) : "–");

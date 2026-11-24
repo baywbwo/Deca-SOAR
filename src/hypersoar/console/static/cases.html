@@ -22,6 +22,22 @@
       <div class="score" id="c-score"></div>
     </section>
 
+    <section class="pnl" aria-labelledby="tr-h">
+      <div class="pnl-h"><h2 id="tr-h">Triage</h2><span class="sub" id="tr-sub"></span></div>
+      <div class="pnl-b triage">
+        <label class="k" for="tr-assignee">Assigned to</label><select id="tr-assignee" disabled></select>
+        <span class="k" id="tr-st-l">Status</span>
+        <span class="seg" id="tr-status" role="group" aria-labelledby="tr-st-l"><button type="button" data-st="open" disabled>Open</button><button type="button" data-st="waiting" disabled>Waiting</button><button type="button" data-st="closed" disabled>Closed</button></span>
+        <p class="note" id="tr-msg" role="status" aria-live="polite"></p>
+      </div>
+      <ol class="comments bt" id="cm" aria-label="Comments"></ol>
+      <form class="pnl-b comment-form bt" id="cm-form">
+        <label class="k" for="cm-body">Add a comment</label>
+        <textarea id="cm-body" name="body" rows="3" maxlength="2000"></textarea>
+        <button class="btn pri" type="submit" disabled>Comment</button>
+      </form>
+    </section>
+
     <section class="pnl lm-wrap" id="ap" aria-labelledby="ap-h">
       <div class="pnl-h"><h2 id="ap-h">Attack path</h2><span class="sub">How the attacker moved, replayed from the alerts in this case</span><span class="r flag sbx-only">Synthetic data</span></div>
       <div class="lm" id="lm"></div>
@@ -53,7 +69,7 @@
       </section>
       <div class="stack">
         <section class="pnl" aria-labelledby="pc-h">
-          <div class="pnl-h"><h2 id="pc-h">Response</h2><span class="sub">Broker decisions, shadow mode</span></div>
+          <div class="pnl-h"><h2 id="pc-h">Response</h2><span class="sub">Broker decisions</span></div>
           <div class="table-wrap"><table class="tight">
             <thead><tr><th>Action</th><th>Level</th><th>Decision</th></tr></thead>
             <tbody id="resp"></tbody></table></div>

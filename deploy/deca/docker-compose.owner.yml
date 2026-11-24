@@ -1,4 +1,4 @@
-# Owner-DSN jobs (review N2): `hypersoar migrate` and `create-principal`, the only commands that need the
+# Owner-DSN jobs (review N2): `hypersoar migrate`, `create-principal` and `set-reauth`, the only commands that need the
 # role owning the DECA schema. Kept out of docker-compose.yml so `up` can never start it and no service
 # there references the owner secret. Always run through deploy/deca/bin/deca-owner-run.sh, which mounts
 # the DSN from a tmpfs file for one `run --rm` and deletes it afterwards.

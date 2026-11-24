@@ -131,7 +131,7 @@ Yang tidak bisa dicek dari host: jumlah sertifikat yang pernah diterbitkan (regi
 docker pull python:3.12-slim-bookworm && docker inspect --format '{{index .RepoDigests 0}}' python:3.12-slim-bookworm
 sudo install -m 0600 /dev/null /etc/deca-soar/deca.env   # HYPERSOAR_BASE_IMAGE=python:3.12-slim-bookworm@sha256:<64 hex>,
                                                          # HYPERSOAR_IMAGE, HYPERSOAR_BIND_IP, HYPERSOAR_TEMPORAL_ADDRESS,
-                                                         # HYPERSOAR_BROKER_URL=https://…:8100, HYPERSOAR_POLICY_HOST_DIR, HYPERSOAR_REPLAY_DIR
+                                                         # HYPERSOAR_BROKER_URL=https://…:8100, HYPERSOAR_POLICY_HOST_DIR
 docker build -f deploy/deca/Dockerfile --build-arg BASE_IMAGE=<HYPERSOAR_BASE_IMAGE> -t hypersoar:$(git rev-parse --short HEAD) .
 #   dependensi Python dari deploy/deca/requirements/*.lock (== + sha256, --require-hashes, wheel saja)
 C="docker compose -f deploy/deca/docker-compose.yml --env-file /etc/deca-soar/deca.env"

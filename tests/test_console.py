@@ -171,7 +171,7 @@ def test_login_flow_and_cookie_flags(console):
         assert flag.lower() in cookie.lower()
     assert console.get("/").status_code == 200
     s = console.get("/api/state").json()
-    assert s["meta"] == {"synthetic": True, "sha": "abc1234", "user": "owner", "mode": "shadow", "read_only": True}
+    assert s["meta"] == {"synthetic": True, "sha": "abc1234", "user": "owner"}
     assert s["ledger"]["ok"] is True
     out = console.post("/logout", headers=ORIGIN, follow_redirects=False)
     assert out.status_code == 303
@@ -252,15 +252,16 @@ def test_pages_render_with_csp_and_sandbox_marker(console):
     assert console.get("/api/cases/1;drop").status_code == 404
 
 
-def test_production_marks_pages_and_hides_scenarios(console):
+def test_production_marks_pages_and_has_no_scenarios(console):
     from hypersoar.console.app import fastapi_app
     assert _login(console).status_code == 303
     console_env_install = fastapi_app.state.install
     real = console_env_install.get
     console_env_install.get = lambda pool: {"mode": "production", "entity_id": "dob"}
     try:
-        assert '<body class="app prod" data-screen="scenarios"' in console.get("/scenarios").text
-        assert console.get("/api/scenarios").json() == {"hidden": True}
+        assert console.get("/scenarios").status_code == 404
+        assert console.get("/api/scenarios").status_code == 404
+        assert '<body class="app prod" data-screen="overview"' in console.get("/").text
         assert console.get("/api/shell").json()["mode"] == "production"
     finally:
         console_env_install.get = real
@@ -288,14 +289,16 @@ def test_evidence_counts_alerts_in_the_right_number():
     assert _evidence({"alert_ids": ["a", "b"]}) == ["2 alerts in the case"]
 
 
-def test_no_write_endpoints():
+def test_write_endpoints_are_listed_in_test_console_writes():
+    from test_console_writes import WRITES
+
     from hypersoar.console.app import fastapi_app
     writes = sorted((r.path, m) for r in fastapi_app.routes for m in getattr(r, "methods", set()) - {"GET", "HEAD"})
-    assert writes == [("/login", "POST"), ("/logout", "POST")]
+    assert writes == WRITES
 
 
 def test_body_limit(console):
-    r = console.post("/login", content="a" * 10_000, headers={"content-type": "application/x-www-form-urlencoded",
+    r = console.post("/login", content="a" * 20_000, headers={"content-type": "application/x-www-form-urlencoded",
                                                              **ORIGIN})
     assert r.status_code == 413
 
@@ -352,7 +355,7 @@ def test_new_api_shapes_and_no_raw_addresses(client, principals, pool, settings,
         cases = out["/api/cases?status=open"].json()["cases"]
         details = [c.get(f"/api/cases/{x['case_id']}") for x in cases]
     shell = out["/api/shell"].json()
-    assert shell["meta"]["read_only"] is True and shell["mode"] == "sandbox" and shell["ledger"]["ok"] is True
+    assert shell["meta"]["writes"] is False and shell["meta"]["csrf"] and shell["mode"] == "sandbox" and shell["ledger"]["ok"] is True
     assert shell["kill_switch"]["global_engaged"] is False
     ov = out["/api/overview"].json()
     assert ov["stats"]["alerts_24h"] == 2 and len(ov["timeline"]) == 24

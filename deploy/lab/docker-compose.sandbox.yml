@@ -1,0 +1,78 @@
+# Sandbox stack of the lab (project deca-lab), on top of deploy/deca/docker-compose.yml and
+# deploy/lab/docker-compose.lab.yml. Synthetic data only: the seeding bot writes attack campaigns to the
+# replay file, Lark/Jira/9router are mocks, `scenario` (profile tools) plays scenarios/*.yaml end to end and
+# the integration settings API accepts writes. None of this exists in the production stack.
+x-sandbox: &sandbox
+  HYPERSOAR_ENV: lab
+  HYPERSOAR_MODE: sandbox
+
+services:
+  broker:
+    environment:
+      <<: *sandbox
+      # The synthetic alerts use TEST-NET addresses, which the broker otherwise refuses.
+      HYPERSOAR_ALLOW_TEST_NETS: "1"
+      # Integration settings and secrets can be changed through the broker API (sandbox only).
+      HYPERSOAR_INTEGRATION_WRITES: "1"
+
+  gateway:
+    environment:
+      <<: *sandbox
+      HYPERSOAR_GATEWAY_SOURCE: replay
+      HYPERSOAR_REPLAY_FILE: /data/replay/alerts.ndjson
+    volumes:
+      - ${HYPERSOAR_REPLAY_DIR:?directory with alerts.ndjson}:/data/replay:ro
+    depends_on:
+      synth: {condition: service_started}
+
+  console:
+    environment:
+      HYPERSOAR_CONSOLE_SYNTHETIC: "1"
+
+  synth:
+    image: ${HYPERSOAR_IMAGE:?e.g. hypersoar:<git-sha>}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    command: ["hypersoar", "synth-alerts", "--out", "/data/replay/alerts.ndjson",
+              "--interval", "${HYPERSOAR_LAB_SYNTH_INTERVAL_S:-120}"]
+    environment:
+      HYPERSOAR_MODE: sandbox
+    volumes: ["${HYPERSOAR_REPLAY_DIR:?}:/data/replay"]
+    networks: [deca]
+    logging:
+      driver: json-file
+      options: {max-size: 20m, max-file: "3"}
+
+  # Sandbox scenario runs (QA): `$C --profile tools run --rm scenario [--only <id>]`. Appends the scenario's
+  # synthetic alerts to the replay file, follows them through gateway, worker, broker and the mock
+  # integrations, and records each result in qa.scenario_run. Broker DB role: it reads cases and decisions
+  # and writes only qa.scenario_run, integration test runs and integration settings seeding.
+  scenario:
+    image: ${HYPERSOAR_IMAGE:?e.g. hypersoar:<git-sha>}
+    restart: "no"
+    profiles: [tools]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    entrypoint: ["hypersoar", "scenario", "run", "--replay", "/data/replay/alerts.ndjson", "--actor", "lab-qa"]
+    command: []
+    environment:
+      <<: *sandbox
+      HYPERSOAR_ENTITY: ${HYPERSOAR_ENTITY:-dob}
+      HYPERSOAR_DB_URL_FILE: /run/secrets/deca_db_url_broker
+      HYPERSOAR_POLICY_DIR: /etc/deca-soar/policy
+      HYPERSOAR_GIT_SHA: ${HYPERSOAR_GIT_SHA:-unknown}
+    secrets: [deca_db_url_broker, deca_db_ca]
+    volumes:
+      - "${HYPERSOAR_REPLAY_DIR:?}:/data/replay"
+      - "${HYPERSOAR_POLICY_HOST_DIR:?}:/etc/deca-soar/policy:ro"
+    networks: [deca]
+    logging:
+      driver: json-file
+      options: {max-size: 20m, max-file: "3"}
+    depends_on:
+      postgres: {condition: service_healthy}

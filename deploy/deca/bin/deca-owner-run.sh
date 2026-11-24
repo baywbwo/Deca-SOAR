@@ -4,6 +4,7 @@
 #   <ops-vault get deca_db_url_owner> | sudo deploy/deca/bin/deca-owner-run.sh migrate
 #   <ops-vault get deca_db_url_owner> | sudo deploy/deca/bin/deca-owner-run.sh create-principal \
 #       --name temporal-worker --kind service --role analyst --token-file /out/worker.token
+#   (<owner DSN>; <new password>) | sudo deploy/deca/bin/deca-owner-run.sh set-reauth --name owner --actor ops
 #
 # The DSN is read from stdin (hidden prompt on a terminal), never from argv or a long-lived env. It is
 # written to a 0400 file in a fresh tmpfs directory, mounted into exactly one `docker compose run --rm`
@@ -12,9 +13,9 @@
 # vault if the job was ever run any other way.
 set -eu
 
-usage() { echo "usage: <owner DSN on stdin> | $0 migrate|create-principal [args]" >&2; exit 64; }
+usage() { echo "usage: <owner DSN on stdin> | $0 migrate|create-principal|set-reauth [args]" >&2; exit 64; }
 [ $# -ge 1 ] || usage
-case "$1" in migrate|create-principal) ;; *) usage ;; esac
+case "$1" in migrate|create-principal|set-reauth) ;; *) usage ;; esac
 
 REPO=${HYPERSOAR_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)}
 ENV_FILE=${HYPERSOAR_ENV_FILE:-/etc/deca-soar/deca.env}

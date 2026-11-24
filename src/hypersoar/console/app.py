@@ -1,4 +1,4 @@
-"""SOC console process (read-only). Run with uvicorn over TLS behind the tunnel connector:
+"""SOC console process. Run with uvicorn over TLS behind the tunnel connector:
 
     uvicorn hypersoar.console.app:app --host 0.0.0.0 --port 8300 --no-proxy-headers \
         --ssl-certfile ... --ssl-keyfile ...
@@ -7,12 +7,15 @@ Settings: HYPERSOAR_DB_URL(_FILE) is a deca_soar_viewer login; HYPERSOAR_CONSOLE
 scrypt hash from `hypersoar console-hash`; HYPERSOAR_CONSOLE_USER (default `owner`);
 HYPERSOAR_CONSOLE_TRUSTED_PROXIES lists the connector's addresses whose CF-Connecting-IP is believed;
 HYPERSOAR_CONSOLE_SYNTHETIC=1 labels the data as synthetic; HYPERSOAR_GIT_SHA is shown in the footer.
+Reads use the read-only viewer login. Writes (approve, kill switch, case triage, revoke) are posted to the
+broker; see console/writes.py for HYPERSOAR_BROKER_URL / _TOKEN(_FILE) / _CA_FILE.
 """
 
 from __future__ import annotations
 
 import hmac
 import html
+import json
 import logging
 import os
 import re
@@ -34,16 +37,19 @@ from hypersoar.common.config import ConfigError, _cidrs, read_secret
 from hypersoar.common.dbguard import assert_least_privilege_login
 from hypersoar.common.http import BodyLimit
 from hypersoar.console import queries, views
+from hypersoar.console import writes as cw
 from hypersoar.console.auth import LoginLimiter, PasswordHash, SessionStore, client_address
 
 log = logging.getLogger("hypersoar.console")
 
 STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "__Host-hypersoar_console"
-MAX_BODY = 4096
+MAX_BODY = 16384  # a 2000-character comment in any script, plus JSON
 # Screens of the v3 console. Each is a static page with no inline code, filled by console.js from /api/*.
 PAGES = {"/": "overview.html", "/map": "map.html", "/cases": "cases.html", "/approvals": "approvals.html",
          "/automation": "automation.html", "/scenarios": "scenarios.html"}
+# Sandbox tools: production answers 404 for these, so they are not just hidden but absent.
+SANDBOX_ONLY = {"/scenarios", "/api/scenarios"}
 STATIC_FILES = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8",
                 "intercept.svg": "image/svg+xml", "worldmap.svg": "image/svg+xml", "icon.svg": "image/svg+xml",
                 "geist-sans.woff2": "font/woff2", "geist-mono.woff2": "font/woff2"}
@@ -86,6 +92,9 @@ async def lifespan(app: FastAPI):
     app.state.sha = os.environ.get("HYPERSOAR_GIT_SHA", "unknown")[:40]
     app.state.sessions = SessionStore()
     app.state.limiter = LoginLimiter()
+    # Wrong passwords on re-authenticated writes: 5 per 15 minutes per person and address.
+    app.state.reauth_limiter = LoginLimiter(per_client=5, window_s=900, global_per_min=60)
+    app.state.ask_ai = AskAiReplay()
     app.state.ledger = queries.LedgerStatus()
     app.state.install = InstallInfo()
     app.state.entity = {}
@@ -100,8 +109,38 @@ async def lifespan(app: FastAPI):
         pool.close()
         raise
     app.state.pool = pool
+    try:
+        app.state.broker = cw.BrokerClient.from_env(app.state.install.get(pool)["mode"])
+    except BaseException:
+        pool.close()
+        raise
+    if app.state.broker is None:
+        log.warning("console: HYPERSOAR_BROKER_URL not set; every write answers 503")
     yield
+    if app.state.broker is not None:
+        app.state.broker.close()
     pool.close()
+
+
+class AskAiReplay:
+    """The broker's triage endpoint has no Idempotency-Key, so a retried "Ask AI" click with the same key
+    returns the first answer from here instead of calling the model twice."""
+
+    def __init__(self, ttl_s: float = 600, max_items: int = 256) -> None:
+        self.ttl_s, self.max_items, self._d, self._lock = ttl_s, max_items, {}, threading.Lock()
+
+    def get(self, key: tuple) -> tuple[int, dict] | None:
+        with self._lock:
+            v = self._d.get(key)
+            if v is None or time.monotonic() - v[0] > self.ttl_s:
+                return None
+            return v[1], {**v[2], "idempotent_replay": True}
+
+    def put(self, key: tuple, status: int, body: dict) -> None:
+        with self._lock:
+            if len(self._d) >= self.max_items:
+                del self._d[min(self._d, key=lambda k: self._d[k][0])]
+            self._d[key] = (time.monotonic(), status, body)
 
 
 class InstallInfo:
@@ -202,7 +241,7 @@ def _login_page(request: Request, status: int = 200, msg: str | None = None) -> 
 <div class="gate-copy">
 <p class="eyebrow">{eyebrow}</p>
 <h1 class="display">Watch every<br>decision<span class="cut">.</span></h1>
-<p class="lede">Read-only view of the gateway, triage and action broker. Nothing here can change state.</p>
+<p class="lede">Cases, approvals and the kill switch of the gateway, triage and action broker. Every change asks for your password again and goes into the audit trail.</p>
 </div>
 <form method="post" action="/login" class="gate-form">
 <label for="username">Username</label>
@@ -268,24 +307,30 @@ def logout(request: Request):
     return r
 
 
-def _page(request: Request, name: str):
+def _production(request: Request) -> bool:
+    return request.app.state.install.get(request.app.state.pool)["mode"] == "production"
+
+
+def _page(request: Request, path: str, name: str):
     if not _session(request):
         return RedirectResponse("/login", status_code=303)
     page = (STATIC / name).read_text()
     # Production hides sandbox-only parts server side, so they never flash before console.js runs.
-    if request.app.state.install.get(request.app.state.pool)["mode"] == "production":
+    if _production(request):
+        if path in SANDBOX_ONLY:
+            return Response(status_code=404)
         page = page.replace('<body class="app"', '<body class="app prod"', 1)
     return HTMLResponse(page)
 
 
-def _page_route(name: str):
+def _page_route(path: str, name: str):
     def route(request: Request):
-        return _page(request, name)
+        return _page(request, path, name)
     return route
 
 
 for _path, _name in PAGES.items():
-    fastapi_app.add_api_route(_path, _page_route(_name), methods=["GET"], include_in_schema=False)
+    fastapi_app.add_api_route(_path, _page_route(_path, _name), methods=["GET"], include_in_schema=False)
 
 
 @fastapi_app.get("/static/{name}")
@@ -314,8 +359,8 @@ def api_shell(request: Request):
         return {**views.shell(conn, inst), "mode": inst["mode"], "entity_id": inst["entity_id"],
                 "entity": ent if (ent := _entity_public(st.entity, inst["mode"])) and ent["id"] == inst["entity_id"] else None,
                 "kill_switch": queries.kill_switch(conn), "ledger": st.ledger.get(conn),
-                "meta": {"synthetic": st.synthetic, "sha": st.sha, "user": s.user, "mode": "shadow",
-                         "read_only": True},
+                "meta": {"synthetic": st.synthetic, "sha": st.sha, "user": s.user, "csrf": s.csrf,
+                         "writes": st.broker is not None},
                 "now": views.now_iso()}
     return _api(request, build)
 
@@ -347,7 +392,8 @@ def api_case(request: Request, case_id: str):
 
     def build(conn, inst, s):
         d = views.case_detail(conn, inst, case_id)
-        return d if d is not None else JSONResponse({"detail": "not found"}, status_code=404)
+        return {**d, "people": views.people(conn, inst)} if d is not None else JSONResponse(
+            {"detail": "not found"}, status_code=404)
     return _api(request, build)
 
 
@@ -365,9 +411,9 @@ def api_automation(request: Request):
 
 @fastapi_app.get("/api/scenarios")
 def api_scenarios(request: Request):
-    # Scenario tests are a sandbox tool: production shows no run, no seeding rate and no gate list.
-    return _api(request, lambda conn, inst, s: {"hidden": True} if inst["mode"] != "sandbox"
-                else views.scenarios(conn, inst))
+    # Scenario tests are a sandbox tool: production has no such endpoint.
+    return _api(request, lambda conn, inst, s: JSONResponse({"detail": "not found"}, status_code=404)
+                if inst["mode"] != "sandbox" else views.scenarios(conn, inst))
 
 
 @fastapi_app.get("/api/state")
@@ -377,9 +423,95 @@ def api_state(request: Request):
         return JSONResponse({"detail": "login required"}, status_code=401)
     with request.app.state.pool.connection() as conn:
         data = queries.state(conn, request.app.state.ledger)
-    data["meta"] = {"synthetic": request.app.state.synthetic, "sha": request.app.state.sha,
-                    "user": s.user, "mode": "shadow", "read_only": True}
+    data["meta"] = {"synthetic": request.app.state.synthetic, "sha": request.app.state.sha, "user": s.user}
     return data
+
+
+# -- writes: checked here for the browser, decided by the broker --------------------------------------
+def _deny(status: int, detail: str) -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=status)
+
+
+async def _write(request: Request, plan):
+    """Session, same origin, CSRF token, JSON body, Idempotency-Key; then the broker decides."""
+    st = request.app.state
+    s = _session(request)
+    if not s:
+        return _deny(401, "login required")
+    if not _same_origin(request):
+        return _deny(403, "cross-origin request refused")
+    if not hmac.compare_digest(request.headers.get(cw.CSRF_HEADER, "").encode(), s.csrf.encode()):
+        return _deny(403, "missing or wrong CSRF token; reload the page")
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+        return _deny(415, "send JSON")
+    key = request.headers.get("idempotency-key", "")
+    if not cw.IDEMPOTENCY_KEY.match(key):
+        return _deny(422, "Idempotency-Key must be 8-128 letters, digits, - or _")
+    if st.broker is None:
+        return _deny(503, "writes are not configured on this console")
+    def build(data):
+        inst = st.install.get(st.pool)
+        with st.pool.connection() as conn:
+            return plan(data, conn, inst)
+
+    try:
+        p = await run_in_threadpool(build, json.loads(await request.body() or b"null"))
+    except (ValueError, UnicodeDecodeError) as e:
+        detail = str(e) if isinstance(e, cw.BadInput) else "body must be JSON"
+        return _deny(404 if detail == "not found" else 422, detail)
+    bucket = f"{s.user}|{_client(request)}"
+    if p.reauth and not st.reauth_limiter.allow(bucket):
+        log.warning("console re-auth rate-limited user=%s", s.user)
+        return _deny(429, "too many wrong passwords; wait a few minutes")
+    replay_key = (s.user, key) if p.path == "/v1/triage" else None
+    if replay_key and (prev := st.ask_ai.get(replay_key)):
+        return JSONResponse(prev[1], status_code=prev[0])
+    status, out = await run_in_threadpool(st.broker.post, p.path, p.body, key)
+    if p.reauth:
+        if status == 403 and "re-authentication" in str(out.get("detail", "")):
+            st.reauth_limiter.failed(bucket)
+        elif status < 300:
+            st.reauth_limiter.succeeded(bucket)
+    if replay_key and status < 300:
+        st.ask_ai.put(replay_key, status, out)
+    log.info("console write path=%s status=%s user=%s", p.path.split("/")[2] if p.path.count("/") > 1 else p.path,
+             status, s.user)
+    return JSONResponse(out, status_code=status)
+
+
+@fastapi_app.post("/api/approvals/{request_id}/decision")
+async def w_decision(request: Request, request_id: str):
+    return await _write(request, lambda d, conn, inst: cw.decision(request_id, d))
+
+
+@fastapi_app.post("/api/approvals/{request_id}/ask-ai")
+async def w_ask_ai(request: Request, request_id: str):
+    return await _write(request, lambda d, conn, inst: cw.ask_ai(conn, inst["entity_id"], request_id, d))
+
+
+@fastapi_app.post("/api/requests/{request_id}/revoke")
+async def w_revoke(request: Request, request_id: str):
+    return await _write(request, lambda d, conn, inst: cw.revoke(request_id, d))
+
+
+@fastapi_app.post("/api/kill-switch")
+async def w_kill_switch(request: Request):
+    return await _write(request, lambda d, conn, inst: cw.kill_switch(d))
+
+
+@fastapi_app.post("/api/cases/{case_id}/assign")
+async def w_assign(request: Request, case_id: str):
+    return await _write(request, lambda d, conn, inst: cw.assign(case_id, d))
+
+
+@fastapi_app.post("/api/cases/{case_id}/status")
+async def w_status(request: Request, case_id: str):
+    return await _write(request, lambda d, conn, inst: cw.status(case_id, d))
+
+
+@fastapi_app.post("/api/cases/{case_id}/comments")
+async def w_comment(request: Request, case_id: str):
+    return await _write(request, lambda d, conn, inst: cw.comment(case_id, d))
 
 
 app = BodyLimit(fastapi_app, MAX_BODY)

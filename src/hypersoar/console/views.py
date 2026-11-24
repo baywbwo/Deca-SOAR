@@ -38,7 +38,7 @@ def install(conn) -> dict:
 def shell(conn, inst: dict) -> dict:
     e = inst["entity_id"]
     n = conn.execute(
-        "SELECT (SELECT count(*) FROM gateway.alert_case WHERE entity_id = %(e)s AND status = 'open') AS open_cases,"
+        "SELECT (SELECT count(*) FROM gateway.alert_case WHERE entity_id = %(e)s AND status <> 'closed') AS open_cases,"
         " (SELECT count(*) FROM broker.action_request WHERE entity_id = %(e)s AND status = 'pending_approval'"
         "   AND (expires_at IS NULL OR expires_at > now())) AS pending,"
         " (SELECT max(ingested_at) FROM gateway.inbox_event WHERE entity_id = %(e)s) AS last_ingest",
@@ -81,7 +81,7 @@ def integrations(conn, inst: dict) -> list[dict]:
         " LEFT JOIN LATERAL (SELECT created_at, operation, status, external_ref FROM broker.integration_call x"
         "   WHERE x.entity_id = c.entity_id AND x.integration = c.integration ORDER BY created_at DESC LIMIT 1) l"
         "   ON true"
-        " WHERE c.entity_id = %s AND c.mode = %s ORDER BY array_position(ARRAY['lark','jira','ai'], c.integration)",
+        " WHERE c.entity_id = %s AND c.mode = %s ORDER BY array_position(ARRAY['lark','jira','ai'], c.integration), c.integration",
         (e, mode)).fetchall()
     out = []
     for r in rows:
@@ -91,6 +91,12 @@ def integrations(conn, inst: dict) -> list[dict]:
             detail = ", ".join(sorted(c for c in chats if c)) or "no chat set"
         elif r["integration"] == "jira":
             detail = f"Project {s.get('project', '?')}"
+        elif r["integration"] == "webhook":
+            detail = f"Signed webhook (HMAC), {s.get('source_type', 'siem')} alerts"
+        elif r["integration"] == "syslog":
+            detail = f"Syslog CEF from {len(s.get('allowed_senders') or [])} allowed network(s)"
+        elif r["integration"] == "sls":
+            detail = f"Alibaba Cloud SLS {s.get('project', '?')}/{s.get('logstore', '?')}"
         else:
             detail = s.get("triage_model") or "no model set"
         tested_ok = r["test_status"] == "pass" and r["tested_version"] == r["version"]
@@ -121,11 +127,11 @@ def overview(conn, inst: dict) -> dict:
         "   AND ingested_at > now() - interval '24 hours') AS events_24h,"
         " (SELECT count(*) FROM gateway.inbox_event WHERE entity_id = %(e)s"
         "   AND ingested_at > now() - interval '1 hour') AS alerts_1h,"
-        " (SELECT count(*) FROM gateway.alert_case WHERE entity_id = %(e)s AND status = 'open') AS open_cases,"
-        " (SELECT count(*) FROM gateway.alert_case WHERE entity_id = %(e)s AND status = 'open'"
+        " (SELECT count(*) FROM gateway.alert_case WHERE entity_id = %(e)s AND status <> 'closed') AS open_cases,"
+        " (SELECT count(*) FROM gateway.alert_case WHERE entity_id = %(e)s AND status <> 'closed'"
         "   AND max_severity = 'critical') AS critical_cases,"
         " (SELECT coalesce(sum(alert_count), 0) FROM gateway.alert_case WHERE entity_id = %(e)s"
-        "   AND status = 'open') AS alerts_in_open,"
+        "   AND status <> 'closed') AS alerts_in_open,"
         " (SELECT count(*) FROM gateway.alert_case WHERE entity_id = %(e)s"
         "   AND opened_at > now() - interval '24 hours') AS cases_24h,"
         " (SELECT count(*) FROM broker.decision_record WHERE entity_id = %(e)s"
@@ -224,13 +230,15 @@ def feed(conn, inst: dict, limit: int = FEED) -> list[dict]:
 
 # -- cases -----------------------------------------------------------------------------------------------
 def case_list(conn, inst: dict, status: str, limit: int = CASE_LIST) -> list[dict]:
-    """open, waiting (open with an L2 request pending) or closed."""
-    where = {"open": "c.status = 'open'", "closed": "c.status = 'closed'",
-             "waiting": "c.status = 'open' AND p.pending > 0"}[status]
+    """open (everything not closed), waiting (set by an analyst, or open with a request pending approval)
+    or closed."""
+    where = {"open": "c.status <> 'closed'", "closed": "c.status = 'closed'",
+             "waiting": "(c.status = 'waiting' OR (c.status = 'open' AND p.pending > 0))"}[status]
     rows = conn.execute(
         "SELECT c.case_id, c.title, c.category, c.status, c.max_severity, c.criticality, c.priority,"
         " c.alert_count, c.event_count, c.primary_kind, c.primary_value, c.origin_city, c.opened_at,"
-        " c.last_seen_at, c.closed_at, c.close_reason, c.tactics, j.issue_key, coalesce(p.pending, 0) AS pending,"
+        " c.last_seen_at, c.closed_at, c.close_reason, c.tactics, c.assignee, j.issue_key,"
+        " coalesce(p.pending, 0) AS pending,"
         " d.verdict, d.confidence, r.action, r.status AS req_status, r.level"
         " FROM gateway.alert_case c"
         " LEFT JOIN broker.jira_issue j ON j.entity_id = c.entity_id AND j.case_id = c.case_id"
@@ -254,7 +262,7 @@ def case_list(conn, inst: dict, status: str, limit: int = CASE_LIST) -> list[dic
         "last_seen_at": _iso(r["last_seen_at"]), "closed_at": _iso(r["closed_at"]),
         "close_reason": _clip(r["close_reason"], 40), "tactics": list(r["tactics"]), "jira": r["issue_key"],
         "pending": r["pending"], "verdict": r["verdict"], "confidence": r["confidence"],
-        "broker": None if r["action"] is None else {"action": r["action"], "status": r["req_status"],
+        "assignee": _clip(r["assignee"], 80), "broker": None if r["action"] is None else {"action": r["action"], "status": r["req_status"],
                                                     "level": r["level"]},
     } for r in rows]
 
@@ -319,6 +327,9 @@ def case_detail(conn, inst: dict, case_id: str) -> dict | None:
         "SELECT integration, operation, target, status, external_ref, duration_ms, created_at"
         " FROM broker.integration_call WHERE entity_id = %s AND case_id = %s AND integration IN ('jira', 'lark')"
         " ORDER BY created_at LIMIT 20", (e, case_id)).fetchall()
+    comments = conn.execute(
+        "SELECT comment_id, author, body, created_at FROM broker.case_comment WHERE entity_id = %s AND case_id = %s"
+        " ORDER BY created_at DESC LIMIT 50", (e, case_id)).fetchall()
     ai = (decision or {}).get("ai") or {}
     return {
         "case": {
@@ -330,7 +341,8 @@ def case_detail(conn, inst: dict, case_id: str) -> dict | None:
             "origin": {"city": _clip(c["origin_city"], 40), "country": _clip(c["origin_country"], 4),
                        "asn": _clip(c["origin_asn"], 16)},
             "opened_at": _iso(c["opened_at"]), "last_seen_at": _iso(c["last_seen_at"]),
-            "closed_at": _iso(c["closed_at"]), "close_reason": _clip(c["close_reason"], 40),
+            "closed_at": _iso(c["closed_at"]), "close_reason": _clip(c["close_reason"], 120),
+            "assignee": _clip(c["assignee"], 80), "status_by": _clip(c["status_by"], 80),
             "keys": [{"kind": k["key_kind"], "value": _clip(k["key_value"], 40)} for k in keys],
         },
         "alerts": grp,
@@ -359,7 +371,16 @@ def case_detail(conn, inst: dict, case_id: str) -> dict | None:
         "calls": [{"integration": x["integration"], "op": _clip(x["operation"], 40), "target": x["target"],
                    "status": x["status"], "ref": _clip(x["external_ref"], 40), "ms": x["duration_ms"],
                    "at": _iso(x["created_at"])} for x in calls],
+        "comments": [{"id": str(m["comment_id"]), "author": _clip(m["author"], 80), "body": m["body"],
+                      "at": _iso(m["created_at"])} for m in reversed(comments)],
     }
+
+
+def people(conn, inst: dict) -> list[str]:
+    """Who a case can be assigned to: the active people (not services) on this install."""
+    return [r["name"] for r in conn.execute(
+        "SELECT name FROM broker.principal WHERE entity_id = %s AND kind = 'human' AND active ORDER BY name LIMIT 100",
+        (inst["entity_id"],)).fetchall()]
 
 
 def _trace(t: dict) -> dict:
@@ -447,7 +468,7 @@ def automation(conn, inst: dict, catalog: list[dict] | None) -> dict:
         " AS rejected, count(*) AS total FROM broker.action_request WHERE entity_id = %s GROUP BY action",
         (e,)).fetchall()}
     expiring = conn.execute(
-        "SELECT action, case_id, would_execute, created_at, rollback_at FROM broker.action_request"
+        "SELECT request_id, action, case_id, would_execute, created_at, rollback_at FROM broker.action_request"
         " WHERE entity_id = %s AND status = 'validated' AND rollback_at > now() ORDER BY rollback_at LIMIT 6",
         (e,)).fetchall()
     ks = conn.execute("SELECT scope, engaged, changed_at FROM broker.kill_switch WHERE entity_id = %s ORDER BY scope",
@@ -460,11 +481,11 @@ def automation(conn, inst: dict, catalog: list[dict] | None) -> dict:
         n = per_action.get(a["id"]) or {}
         actions.append({"id": a["id"], "level": a["level"], "level_text": LEVEL_TEXT.get(a["level"], a["level"]),
                         "target_mode": a.get("target_mode"), "rate_per_hour": a.get("rate_limit_per_hour"),
-                        "rollback": a.get("rollback"), "n24": n.get("n24", 0), "shadow_total": n.get("total", 0),
-                        "shadow_validated": n.get("validated", 0), "shadow_rejected": n.get("rejected", 0)})
+                        "rollback": a.get("rollback"), "n24": n.get("n24", 0), "total": n.get("total", 0),
+                        "passed": n.get("validated", 0), "blocked": n.get("rejected", 0)})
     return {
         "actions": actions, "catalog_loaded": catalog is not None,
-        "expiring": [{"action": _clip(r["action"], 64), "case_id": r["case_id"], "what": _target(r["would_execute"]),
+        "expiring": [{"id": str(r["request_id"]), "action": _clip(r["action"], 64), "case_id": r["case_id"], "what": _target(r["would_execute"]),
                       "from": _iso(r["created_at"]), "until": _iso(r["rollback_at"])} for r in expiring],
         "kill_switch": [{"scope": _clip(r["scope"], 64), "engaged": r["engaged"], "at": _iso(r["changed_at"])}
                         for r in ks],

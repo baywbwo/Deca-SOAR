@@ -205,9 +205,12 @@ def cmd_scenario_run(a: argparse.Namespace) -> int:
     from hypersoar.broker.integrations.hub import Hub
     from hypersoar.gateway import detections
 
-    mode, ent, box = _integration_ctx(need_box=False)
-    if mode != "sandbox":
+    from hypersoar.common import entity as entity_mod
+
+    # Refuse before touching the database: a production install never sees scenario data.
+    if entity_mod.current_mode() != "sandbox":
         raise ConfigError("scenario runs are sandbox only (HYPERSOAR_MODE=sandbox)")
+    mode, ent, box = _integration_ctx(need_box=False)
     catalog, _ = catalog_mod.load(Path(os.environ.get("HYPERSOAR_POLICY_DIR", "policy")))
     rate_limits = {k: v.rate_per_hour for k, v in catalog.items() if v.rate_per_hour}
     found = scn.load_dir(scn.scenarios_dir(), detections.load())
