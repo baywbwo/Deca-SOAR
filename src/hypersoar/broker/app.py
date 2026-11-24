@@ -1,4 +1,8 @@
-"""Action Broker HTTP API (internal network only). Shadow-only: requests are validated and recorded, never executed."""
+"""Action Broker HTTP API (internal network only). Requests are validated and recorded; no cloud
+executor is connected, so nothing is executed against cloud accounts.
+
+Human writes (approve, kill switch, revoke) need the person's password again; case triage needs a
+person. Every write accepts an Idempotency-Key header and leaves a ledger entry."""
 
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hypersoar import ledger
 from hypersoar.broker import catalog as catalog_mod
-from hypersoar.broker import roles, service
+from hypersoar.broker import roles, service, writes
 from hypersoar.broker import triage as triage_mod
 from hypersoar.broker.integrations import NAMES, config as int_config, secretbox
 from hypersoar.broker.integrations import hub as hub_mod
@@ -59,12 +63,38 @@ class ActionRequestIn(BaseModel):
 class ApprovalIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     approve: bool
+    password: str | None = Field(default=None, max_length=1024)
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class KillSwitchIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scope: str = Field(min_length=1, max_length=128)
     engaged: bool
+    password: str | None = Field(default=None, max_length=1024)
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class RevokeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    password: str | None = Field(default=None, max_length=1024)
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class AssignIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    assignee: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class CaseStatusIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["open", "waiting", "closed"]
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class CommentIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    body: str = Field(min_length=1, max_length=2000)
 
 
 class TriageIn(BaseModel):
@@ -200,7 +230,7 @@ def healthz() -> dict:
 
 @app.get("/v1/whoami")
 def whoami(p: Annotated[Principal, Depends(current_principal)]) -> dict:
-    perms = (roles.READ, roles.REQUEST_ACTION, roles.APPROVE, roles.KILL_SWITCH, roles.MANAGE)
+    perms = (roles.READ, roles.REQUEST_ACTION, roles.TRIAGE, roles.APPROVE, roles.KILL_SWITCH, roles.MANAGE)
     return {"name": p.name, "kind": p.kind, "role": p.role, "permissions": [x for x in perms if roles.allowed(p, x)]}
 
 
@@ -243,38 +273,137 @@ def get_request(request_id: uuid.UUID, request: Request, _: Annotated[Principal,
         raise HTTPException(404, "request not found") from None
 
 
+IDEMPOTENCY_KEY = r"^[A-Za-z0-9_-]{8,128}$"
+
+
+def _idem_key(value: str | None) -> str | None:
+    import re
+    if value is None:
+        return None
+    if not re.match(IDEMPOTENCY_KEY, value):
+        raise HTTPException(422, "Idempotency-Key must be 8-128 letters, digits, - or _")
+    return value
+
+
+def human_write(request: Request, p: Principal, key: str | None, operation: str, body: dict, fn, *,
+                reauth: bool) -> dict:
+    """Run one human write in a transaction: re-auth (if asked), idempotent replay, the change, the
+    stored answer. Errors map to 403 (not allowed / re-auth), 404, 409 and 422."""
+    key = _idem_key(key)
+    sha = writes.body_sha(operation, body)
+    pool = request.app.state.pool
+    try:
+        with pool.connection() as conn, conn.transaction():
+            if reauth:
+                writes.check_reauth(conn, p, body.get("password"))
+            elif p.kind != "human":
+                raise PermissionError("only a person can make this change")
+            if key and (prev := writes.replay(conn, p, key, operation, sha)) is not None:
+                return prev
+            out = fn(conn)
+            return writes.remember(conn, p, key, operation, sha, out) if key else {**out, "idempotent_replay": False}
+    except writes.ReauthFailed as e:
+        with pool.connection() as conn, conn.transaction():
+            ledger.append(conn, "auth.reauth_failed", f"principal:{p.name}", {"operation": operation},
+                          request.app.state.broker.entity_id)
+        raise HTTPException(403, str(e)) from None
+    except service.Expired as e:
+        rid = body.get("request_id")
+        if rid:
+            with pool.connection() as conn, conn.transaction():
+                service.mark_expired(conn, rid, f"principal:{p.name}")
+        raise HTTPException(409, str(e)) from None
+    except (service.NotFound, LookupError) as e:
+        raise HTTPException(404, f"{e} not found") from None
+    except PermissionError as e:
+        raise HTTPException(403, str(e)) from None
+    except (service.Conflict, writes.WriteConflict) as e:
+        raise HTTPException(409, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+
+
 @app.post("/v1/actions/requests/{request_id}/approval")
 def post_approval(
     request_id: uuid.UUID,
     body: ApprovalIn,
     request: Request,
     p: Annotated[Principal, Depends(require(roles.APPROVE))],
+    idempotency_key: Annotated[str | None, Header()] = None,
 ) -> dict:
-    try:
-        with request.app.state.pool.connection() as conn, conn.transaction():
-            return service.decide_approval(conn, p, str(request_id), body.approve, request.app.state.broker)
-    except service.Expired as e:
-        with request.app.state.pool.connection() as conn, conn.transaction():
-            service.mark_expired(conn, str(request_id), f"principal:{p.name}")
-        raise HTTPException(409, str(e)) from None
-    except service.NotFound:
-        raise HTTPException(404, "request not found") from None
-    except PermissionError as e:
-        raise HTTPException(403, str(e)) from None
-    except service.Conflict as e:
-        raise HTTPException(409, str(e)) from None
+    b = request.app.state.broker
+    rid = str(request_id)
+    return human_write(
+        request, p, idempotency_key, "approval", {**body.model_dump(), "request_id": rid},
+        lambda conn: service.decide_approval(conn, p, rid, body.approve, b, via="console", reason=body.reason),
+        reauth=True)
+
+
+@app.post("/v1/actions/requests/{request_id}/revoke")
+def post_revoke(
+    request_id: uuid.UUID,
+    body: RevokeIn,
+    request: Request,
+    p: Annotated[Principal, Depends(require(roles.APPROVE))],
+    idempotency_key: Annotated[str | None, Header()] = None,
+) -> dict:
+    b = request.app.state.broker
+    rid = str(request_id)
+    return human_write(request, p, idempotency_key, "revoke", {**body.model_dump(), "request_id": rid},
+                       lambda conn: writes.revoke(conn, b.entity_id, p, rid, body.reason), reauth=True)
 
 
 @app.post("/v1/kill-switch")
 def post_kill_switch(
-    body: KillSwitchIn, request: Request, p: Annotated[Principal, Depends(require(roles.KILL_SWITCH))]
+    body: KillSwitchIn,
+    request: Request,
+    p: Annotated[Principal, Depends(require(roles.KILL_SWITCH))],
+    idempotency_key: Annotated[str | None, Header()] = None,
 ) -> dict:
-    if body.scope != "global" and body.scope not in request.app.state.broker.catalog:
+    b = request.app.state.broker
+    if body.scope != "global" and body.scope not in b.catalog:
         raise HTTPException(422, "scope must be 'global' or a catalog action")
-    with request.app.state.pool.connection() as conn, conn.transaction():
+
+    def change(conn):
         service.set_kill_switch(conn, p.principal_id, f"principal:{p.name}", body.scope, body.engaged,
-                                request.app.state.broker.entity_id)
-    return {"scope": body.scope, "engaged": body.engaged}
+                                b.entity_id, body.reason)
+        return {"scope": body.scope, "engaged": body.engaged}
+
+    return human_write(request, p, idempotency_key, "kill_switch", body.model_dump(), change, reauth=True)
+
+
+def _case_id(case_id: str) -> str:
+    import re
+    if not re.match(r"^CS-[0-9]{1,9}$", case_id):
+        raise HTTPException(404, "case not found")
+    return case_id
+
+
+@app.post("/v1/cases/{case_id}/assign")
+def post_case_assign(case_id: str, body: AssignIn, request: Request,
+                     p: Annotated[Principal, Depends(require(roles.TRIAGE))],
+                     idempotency_key: Annotated[str | None, Header()] = None) -> dict:
+    cid, e = _case_id(case_id), request.app.state.broker.entity_id
+    return human_write(request, p, idempotency_key, "case.assign", {**body.model_dump(), "case_id": cid},
+                       lambda conn: writes.assign_case(conn, e, p, cid, body.assignee), reauth=False)
+
+
+@app.post("/v1/cases/{case_id}/status")
+def post_case_status(case_id: str, body: CaseStatusIn, request: Request,
+                     p: Annotated[Principal, Depends(require(roles.TRIAGE))],
+                     idempotency_key: Annotated[str | None, Header()] = None) -> dict:
+    cid, e = _case_id(case_id), request.app.state.broker.entity_id
+    return human_write(request, p, idempotency_key, "case.status", {**body.model_dump(), "case_id": cid},
+                       lambda conn: writes.set_case_status(conn, e, p, cid, body.status, body.reason), reauth=False)
+
+
+@app.post("/v1/cases/{case_id}/comments", status_code=201)
+def post_case_comment(case_id: str, body: CommentIn, request: Request,
+                      p: Annotated[Principal, Depends(require(roles.TRIAGE))],
+                      idempotency_key: Annotated[str | None, Header()] = None) -> dict:
+    cid, e = _case_id(case_id), request.app.state.broker.entity_id
+    return human_write(request, p, idempotency_key, "case.comment", {**body.model_dump(), "case_id": cid},
+                       lambda conn: writes.comment_case(conn, e, p, cid, body.body), reauth=False)
 
 
 @app.get("/v1/ledger/verify")

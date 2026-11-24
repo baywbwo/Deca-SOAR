@@ -319,19 +319,26 @@ def _decide(conn: psycopg.Connection, b: Broker | None, r: dict, approve: bool, 
     entity_id = r["entity_id"]
     if r["status"] != "pending_approval":
         raise Conflict(f"request is {r['status']}")
-    if r["level"] != "L2":
-        # L3 never runs automatically and is never approvable from a channel or the API.
+    if r["level"] not in ("L2", "L3"):
         raise PermissionError(f"level {r['level']} cannot be approved here")
+    if r["level"] == "L3" and approve:
+        # L3 has no fast path: never auto, never a one-click channel (Lark). Only a person who
+        # re-authenticated in the console, with a written reason.
+        if via != "console":
+            raise PermissionError("L3 needs a re-authenticated approver in the console")
+        if not (extra.get("reason") or "").strip():
+            raise PermissionError("L3 approval needs a reason")
     if approve and kill_switch_state(conn, r["action"], entity_id):
         raise Conflict("kill switch engaged")
     expires = r["expires_at"] or (r["created_at"] + APPROVAL_TTL)
     if datetime.now(UTC) >= expires:
         raise Expired("approval window expired")
     status = "validated" if approve else "rejected"
+    reason = (extra.get("reason") or "")[:500] or None
     row = conn.execute(
-        "UPDATE broker.action_request SET status = %s, approver = %s, approver_ref = %s WHERE request_id = %s"
-        " RETURNING *",
-        (status, approver_id, approver_ref, request_id),
+        "UPDATE broker.action_request SET status = %s, approver = %s, approver_ref = %s, decision_reason = %s"
+        " WHERE request_id = %s RETURNING *",
+        (status, approver_id, approver_ref, reason, request_id),
     ).fetchone()
     ledger.append(conn, "action.approved" if approve else "action.denied", actor, {
         "request_id": request_id, "case_id": r["case_id"], "approver": approver_id, "approver_ref": approver_ref,
@@ -361,7 +368,7 @@ def mark_expired(conn: psycopg.Connection, request_id: str, actor: str) -> bool:
 
 
 def decide_approval(conn: psycopg.Connection, who: Principal, request_id: str, approve: bool,
-                    b: Broker | None = None) -> dict:
+                    b: Broker | None = None, *, via: str = "api", reason: str | None = None) -> dict:
     """Record an approver decision. In shadow mode an approval still executes nothing."""
     r = conn.execute(
         "SELECT * FROM broker.action_request WHERE request_id = %s FOR UPDATE", (request_id,)
@@ -370,8 +377,11 @@ def decide_approval(conn: psycopg.Connection, who: Principal, request_id: str, a
         raise NotFound("request")
     if str(r["requested_by"]) == who.principal_id:
         raise PermissionError("requester cannot approve their own request")
+    extra = {"role": who.role}
+    if reason:
+        extra["reason"] = reason[:500]
     return _decide(conn, b, r, approve, approver_id=who.principal_id, approver_ref=None,
-                   actor=f"principal:{who.name}", via="api", extra={"role": who.role})
+                   actor=f"principal:{who.name}", via=via, extra=extra)
 
 
 def decide_from_lark(conn: psycopg.Connection, b: Broker, lark_user_id: str, request_id: str, approve: bool) -> dict:
@@ -403,11 +413,13 @@ def record_refusal(conn: psycopg.Connection, b: Broker, lark_user_id: str, reque
 
 
 def set_kill_switch(conn: psycopg.Connection, who_id: str, actor: str, scope: str, engaged: bool,
-                    entity_id: str = "dob") -> None:
+                    entity_id: str = "dob", reason: str | None = None) -> None:
+    reason = (reason or "").strip()[:500] or None
     conn.execute(
-        "INSERT INTO broker.kill_switch (entity_id, scope, engaged, changed_by) VALUES (%s, %s, %s, %s)"
+        "INSERT INTO broker.kill_switch (entity_id, scope, engaged, changed_by, reason) VALUES (%s, %s, %s, %s, %s)"
         " ON CONFLICT (entity_id, scope) DO UPDATE SET engaged = EXCLUDED.engaged, changed_by = EXCLUDED.changed_by,"
-        " changed_at = now()",
-        (entity_id, scope, engaged, who_id),
+        " reason = EXCLUDED.reason, changed_at = now()",
+        (entity_id, scope, engaged, who_id, reason),
     )
-    ledger.append(conn, "kill_switch.changed", actor, {"scope": scope, "engaged": engaged}, entity_id)
+    ledger.append(conn, "kill_switch.changed", actor, {"scope": scope, "engaged": engaged, "reason": reason},
+                  entity_id)

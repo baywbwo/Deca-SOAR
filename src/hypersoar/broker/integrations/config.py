@@ -14,7 +14,8 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from hypersoar import ledger
-from hypersoar.broker.integrations import LABELS, NAMES, secretbox
+from hypersoar import sources
+from hypersoar.broker.integrations import CATEGORY, LABELS, NAMES, secretbox
 
 SEVERITIES = ("critical", "high", "medium", "low")
 TITLE_FIELDS = frozenset({"severity", "case_id", "case_title", "asset"})
@@ -113,7 +114,8 @@ class AiSettings(_M):
     mock_fault: Literal["none", "invalid_json", "invalid_json_primary", "timeout"] = "none"
 
 
-MODELS = {"lark": LarkSettings, "jira": JiraSettings, "ai": AiSettings}
+MODELS = {"lark": LarkSettings, "jira": JiraSettings, "ai": AiSettings,
+          **{n: s.model for n, s in sources.SPECS.items()}}
 
 
 class ConfigInvalid(ValueError):
@@ -127,6 +129,8 @@ def validate(integration: str, mode: str, target: str, settings: dict):
         raise ConfigInvalid("target must be mock or live")
     if mode == "production" and target != "live":
         raise ConfigInvalid("production cannot use a mock target")
+    if CATEGORY[integration] == "source" and target != "live":
+        raise ConfigInvalid("a data source has no mock target (sandbox test data comes from the seeding bot)")
     try:
         model = MODELS[integration].model_validate(settings)
     except ValidationError as e:
@@ -251,7 +255,7 @@ def view(conn, entity_id: str, integration: str, mode: str) -> dict:
     else:
         state = "connected"
     return {
-        "integration": integration, "label": LABELS[integration], "mode": mode,
+        "integration": integration, "label": LABELS[integration], "category": CATEGORY[integration], "mode": mode,
         "target": row["target"] if row else None, "enabled": row["enabled"] if row else False,
         "version": row["version"] if row else 0, "settings": row["settings"] if row else None,
         "updated_by": row["updated_by"] if row else None,

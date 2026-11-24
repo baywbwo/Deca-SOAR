@@ -45,12 +45,14 @@ def pull_once(pool: ConnectionPool, source: AlertSource, settings: Settings, *, 
             "SELECT cursor FROM gateway.ingest_cursor WHERE source_name = %s FOR UPDATE", (source.name,)
         ).fetchone()
         cursor = row["cursor"] if row else None
-        raws, new_cursor = source.pull(cursor, limit)
+        # Spool sources take their rows in this transaction, so the inbox write and the spool delete commit together.
+        raws, new_cursor = (source.pull(cursor, limit, conn=conn) if getattr(source, "uses_conn", False)
+                            else source.pull(cursor, limit))
         res.pulled = len(raws)
         for raw in raws:
             try:
                 if raw.get("_invalid"):
-                    raise NormalizeError("invalid JSON line")
+                    raise NormalizeError(raw.get("_reason") or "invalid JSON line")
                 tok = Tokenizer(settings.tokenization_key, settings.internal_cidrs)
                 na = normalize(raw, tok, source_name=source.name, keep_truth=entity.mode == "sandbox")
             except (NormalizeError, KeyError, TypeError, ValueError) as e:

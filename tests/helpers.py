@@ -1,4 +1,5 @@
 import json
+from functools import cache
 from pathlib import Path
 
 from hypersoar.gateway.service import pull_once
@@ -22,3 +23,17 @@ def ingest(pool, settings, tmp_path, rows, name="replay"):
     f = tmp_path / f"{name}.ndjson"
     write_ndjson(f, rows)
     return pull_once(pool, ReplayFileSource(f, name=name), settings)
+
+
+PW = "correct horse battery staple 42"
+
+
+@cache
+def pw_hash() -> str:
+    from hypersoar.console.auth import hash_password
+    return hash_password(PW)
+
+
+def set_reauth(conn, *names: str) -> None:
+    for n in names:
+        conn.execute("UPDATE broker.principal SET reauth_hash = %s WHERE name = %s", (pw_hash(), n))

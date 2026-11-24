@@ -13,7 +13,7 @@ LEVELS = ("L0", "L1", "L2", "L3")
 MODES = ("auto", "approval")
 VERDICTS = ("benign", "suspicious", "malicious", "unknown")
 SEVERITIES = ("info", "low", "medium", "high", "critical")
-SOURCES = ("waf", "actiontrail", "sas", "internal")
+SOURCES = ("waf", "actiontrail", "sas", "internal", "siem")
 PARAM_TYPES = ("string", "int", "token")
 TOKEN_KINDS = ("ip", "user", "ak")
 

@@ -13,7 +13,7 @@ from hypersoar.gateway import detections as detections_mod
 from hypersoar.gateway.detections import Detection
 
 SEVERITIES = ("info", "low", "medium", "high", "critical")
-SOURCES = ("waf", "actiontrail", "sas", "internal")
+SOURCES = ("waf", "actiontrail", "sas", "internal", "siem")
 URI_MAX = 512
 UA_MAX = 256
 DEFAULT_WINDOW_S = 300

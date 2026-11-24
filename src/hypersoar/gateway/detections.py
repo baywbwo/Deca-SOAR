@@ -16,7 +16,7 @@ import yaml
 from hypersoar.common.config import ConfigError
 
 SEVERITIES = ("info", "low", "medium", "high", "critical")
-SOURCES = ("waf", "actiontrail", "sas", "internal")
+SOURCES = ("waf", "actiontrail", "sas", "internal", "siem")
 KINDS = ("ip", "user", "ak", "asset")
 RELS = ("targets", "authenticates_as", "uses_key", "owns_key", "moves_to")
 OUTCOMES = ("attempted", "allowed", "blocked")

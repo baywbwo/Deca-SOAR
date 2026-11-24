@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from psycopg.types.json import Jsonb
 
-from hypersoar import ledger
+from hypersoar import ledger, sources
 from hypersoar.broker.integrations import ai as ai_mod
 from hypersoar.broker.integrations import calls, config, jira as jira_mod, lark as lark_mod, secretbox
 from hypersoar.broker.integrations.calls import IntegrationError, Timer
@@ -31,6 +31,17 @@ NOTIFY_VERDICTS = ("suspicious", "malicious", "unknown")
 
 class NotConfigured(RuntimeError):
     pass
+
+
+@dataclass
+class _SourceProbe:
+    name: str
+    settings: object
+    secrets: dict
+    transport: object = None
+
+    def test(self) -> list[dict]:
+        return sources.connection_test(self.name, self.settings, self.secrets, self.transport)
 
 
 @dataclass
@@ -86,7 +97,11 @@ class Hub:
         with conn_factory() as conn:
             row = config.get(conn, self.entity_id, name, self.mode)
             try:
-                client = {"lark": self.lark, "jira": self.jira, "ai": self.ai}[name](conn)[0]
+                if name in sources.SPECS:
+                    _, s, secrets = self._load(conn, name)
+                    client = _SourceProbe(name, s, secrets, self.transports.get(name))
+                else:
+                    client = {"lark": self.lark, "jira": self.jira, "ai": self.ai}[name](conn)[0]
                 load_error = None
             except (NotConfigured, config.ConfigInvalid) as e:
                 client, load_error = None, str(e)

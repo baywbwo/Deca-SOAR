@@ -11,15 +11,17 @@ REQUEST_ACTION = "request_action"
 APPROVE = "approve"
 KILL_SWITCH = "kill_switch"
 MANAGE = "manage_principals"
+TRIAGE = "triage_case"  # assign, change status, comment
 
 _GRANTS = {
     "viewer": {READ},
-    "analyst": {READ, REQUEST_ACTION},
-    "approver": {READ, REQUEST_ACTION, APPROVE},
-    "admin": {READ, REQUEST_ACTION, APPROVE, KILL_SWITCH, MANAGE},
+    "analyst": {READ, REQUEST_ACTION, TRIAGE},
+    "approver": {READ, REQUEST_ACTION, TRIAGE, APPROVE},
+    "admin": {READ, REQUEST_ACTION, TRIAGE, APPROVE, KILL_SWITCH, MANAGE},
 }
-# Machines (the workflow worker, the agent) have no approver identity (design 6.3 item 6).
-_HUMAN_ONLY = {APPROVE, KILL_SWITCH, MANAGE}
+# Machines (the workflow worker, the agent) have no approver identity (design 6.3 item 6), and
+# case triage is a person's call.
+_HUMAN_ONLY = {APPROVE, KILL_SWITCH, MANAGE, TRIAGE}
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,7 @@ def can_approve(approver: Principal, requested_by: str) -> bool:
 
 
 def matrix() -> dict[str, dict[str, list[str]]]:
-    perms = (READ, REQUEST_ACTION, APPROVE, KILL_SWITCH, MANAGE)
+    perms = (READ, REQUEST_ACTION, TRIAGE, APPROVE, KILL_SWITCH, MANAGE)
     return {
         kind: {r: [x for x in perms if allowed(Principal("", "", kind, r), x)] for r in ROLES}
         for kind in ("human", "service")

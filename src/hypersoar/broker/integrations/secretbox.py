@@ -17,13 +17,14 @@ from datetime import datetime
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from hypersoar import ledger
+from hypersoar import ledger, sources
 from hypersoar.common.config import ConfigError, read_key32
 
 REQUIRED = {
     "lark": ("app_secret", "verification_token", "encrypt_key"),
     "jira": ("api_token",),
     "ai": ("api_key",),
+    **{n: s.required_secrets for n, s in sources.SPECS.items()},
 }
 # Only needed when the matching feature is on (Jira inbound "close the case when Done").
 OPTIONAL = {"jira": ("webhook_secret",)}
@@ -85,11 +86,14 @@ def set_secret(conn, box: SecretBox, entity_id: str, integration: str, mode: str
                   {"integration": integration, "mode": mode, "name": name}, entity_id)
 
 
-def get_secrets(conn, box: SecretBox | None, entity_id: str, integration: str, mode: str) -> dict[str, str]:
+def get_secrets(conn, box: SecretBox | None, entity_id: str, integration: str, mode: str,
+                table: str = "broker.integration_secret") -> dict[str, str]:
+    """table="broker.source_secret" for the gateway, which may read data-source secrets only."""
     if box is None:
         return {}
+    assert table in ("broker.integration_secret", "broker.source_secret")
     rows = conn.execute(
-        "SELECT name, key_id, nonce, ciphertext FROM broker.integration_secret"
+        f"SELECT name, key_id, nonce, ciphertext FROM {table}"
         " WHERE entity_id = %s AND integration = %s AND mode = %s",
         (entity_id, integration, mode),
     ).fetchall()

@@ -33,7 +33,7 @@ def _find_case(conn, entity: Entity, keys: list[tuple[str, str]], at) -> str | N
         return None
     row = conn.execute(
         "SELECT k.case_id FROM gateway.case_key k JOIN gateway.alert_case c USING (entity_id, case_id)"
-        " WHERE k.entity_id = %s AND c.status = 'open' AND (k.key_kind, k.key_value) IN"
+        " WHERE k.entity_id = %s AND c.status IN ('open', 'waiting') AND (k.key_kind, k.key_value) IN"
         " (SELECT * FROM unnest(%s::text[], %s::text[])) AND k.last_seen_at >= %s"
         " ORDER BY k.last_seen_at DESC LIMIT 1",
         (entity.id, [k for k, _ in keys], [v for _, v in keys], at - timedelta(seconds=entity.window_s)),
@@ -174,7 +174,7 @@ def apply_close_requests(conn, entity: Entity) -> list[str]:
     for r in rows:
         hit = conn.execute(
             "UPDATE gateway.alert_case SET status = 'closed', closed_at = now(), close_reason = %s, updated_at = now()"
-            " WHERE entity_id = %s AND case_id = %s AND status = 'open' RETURNING case_id",
+            " WHERE entity_id = %s AND case_id = %s AND status IN ('open', 'waiting') RETURNING case_id",
             (f"{r['source']}:done", entity.id, r["case_id"]),
         ).fetchone()
         conn.execute("UPDATE broker.case_close_request SET applied_at = now() WHERE entity_id = %s AND case_id = %s"

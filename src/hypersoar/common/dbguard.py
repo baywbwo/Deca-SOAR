@@ -28,6 +28,10 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
         "gateway.entity_relation": {"SELECT", "INSERT", "UPDATE"},
         "gateway.case_step": {"SELECT", "INSERT", "UPDATE"},
         "broker.case_close_request": {"SELECT"},
+        "gateway.source_spool": {"SELECT", "INSERT", "DELETE"},
+        "broker.source_config": {"SELECT"},
+        "broker.source_secret": {"SELECT"},
+        "broker.connector_kind": {"SELECT"},
         "vault.token_map": {"INSERT"},
         "ledger.entry": {"SELECT"},
         "public.hypersoar_install": {"SELECT"},
@@ -53,6 +57,9 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
         "broker.integration_secret": {"SELECT", "INSERT", "UPDATE"},
         "broker.ai_usage": {"SELECT", "INSERT", "UPDATE"},
         "qa.scenario_run": {"SELECT", "INSERT"},
+        "broker.case_comment": {"SELECT", "INSERT"},
+        "broker.write_op": {"SELECT", "INSERT"},
+        "broker.connector_kind": {"SELECT"},
         "ledger.entry": {"SELECT"},
         "public.hypersoar_install": {"SELECT"},
     }),
@@ -79,6 +86,8 @@ EXPECTED: dict[str, tuple[str, dict[str, set[str]]]] = {
         "broker.integration_outbox": {"SELECT"},
         "broker.case_close_request": {"SELECT"},
         "qa.scenario_run": {"SELECT"},
+        "broker.case_comment": {"SELECT"},
+        "broker.connector_kind": {"SELECT"},
         "ledger.entry": {"SELECT"},
         "public.hypersoar_install": {"SELECT"},
     }),
@@ -95,10 +104,14 @@ EXPECTED_COLUMNS: dict[str, set[tuple[str, str, str]]] = {
     "gateway": {("vault.token_map", "token", "SELECT")}
                | {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS}
                | {("broker.case_close_request", "applied_at", "UPDATE")},
-    "broker": {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS},
+    "broker": {("ledger.entry", c, "INSERT") for c in LEDGER_INSERT_COLUMNS}
+              | {("gateway.alert_case", c, "UPDATE") for c in (
+                  "status", "status_by", "closed_at", "close_reason", "assignee", "updated_at")},
     "auditor": set(),
     "console": {("broker.integration_secret", c, "SELECT") for c in (
-        "entity_id", "integration", "mode", "name", "key_id", "rotated_at", "rotated_by", "expires_at")},
+        "entity_id", "integration", "mode", "name", "key_id", "rotated_at", "rotated_by", "expires_at")}
+               | {("broker.principal", c, "SELECT") for c in (
+                   "principal_id", "name", "kind", "role", "active", "entity_id")},
 }
 
 

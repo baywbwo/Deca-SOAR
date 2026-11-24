@@ -15,6 +15,7 @@ from psycopg.rows import dict_row
 from hypersoar import ledger
 from hypersoar.ledger.anchor import SinkError, open_sink
 from hypersoar.broker import service
+from hypersoar.broker.integrations import NAMES
 from hypersoar.broker.roles import ROLES
 from hypersoar.common.config import ConfigError, read_secret
 from hypersoar.common.db import MIGRATIONS_DIR, migrate
@@ -93,8 +94,32 @@ def cmd_kill_switch(a: argparse.Namespace) -> int:
         if row is None:
             print("unknown principal", file=sys.stderr)
             return 2
-        service.set_kill_switch(conn, str(row["principal_id"]), f"cli:{a.principal}", a.scope, a.state == "on")
+        from hypersoar.common import entity as entity_mod
+        service.set_kill_switch(conn, str(row["principal_id"]), f"cli:{a.principal}", a.scope, a.state == "on",
+                                entity_mod.load().id, a.reason)
     print(json.dumps({"scope": a.scope, "engaged": a.state == "on"}))
+    return 0
+
+
+def cmd_set_reauth(a: argparse.Namespace) -> int:
+    """Set the re-authentication password of a human principal (read from stdin, never echoed).
+    The console asks for it again before an approval, a kill-switch change or a revoke."""
+    from hypersoar.broker import writes
+    from hypersoar.console.auth import hash_password
+
+    password = sys.stdin.readline().rstrip("\n")
+    try:
+        h = hash_password(password)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    with psycopg.connect(_db_url(), row_factory=dict_row) as conn, conn.transaction():
+        try:
+            writes.set_reauth_hash(conn, a.name, h, f"cli:{a.actor}")
+        except LookupError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+    print(json.dumps({"name": a.name, "reauth_set": True}))
     return 0
 
 
@@ -234,7 +259,12 @@ def main(argv: list[str] | None = None) -> int:
     ks.add_argument("state", choices=("on", "off"))
     ks.add_argument("--scope", default="global")
     ks.add_argument("--principal", required=True)
+    ks.add_argument("--reason", required=True, help="why (recorded with the change and in the ledger)")
     ks.set_defaults(fn=cmd_kill_switch)
+    rs = sub.add_parser("set-reauth", help="set a person's re-authentication password, read from stdin")
+    rs.add_argument("--name", required=True, help="human principal name")
+    rs.add_argument("--actor", required=True, help="who is doing this (recorded in the ledger)")
+    rs.set_defaults(fn=cmd_set_reauth)
     sub.add_parser("worker", help="run the Temporal alert worker").set_defaults(fn=cmd_worker)
     sub.add_parser("console-hash", help="hash a console password read from stdin").set_defaults(fn=cmd_console_hash)
     sa = sub.add_parser("synth-alerts", help="sandbox only: seeding bot, appends synthetic attack campaigns to a replay file")
@@ -243,15 +273,15 @@ def main(argv: list[str] | None = None) -> int:
     sa.add_argument("--count", type=int, default=0, help="stop after this many alerts (0 = run forever)")
     sa.add_argument("--seed", type=int, default=None)
     sa.set_defaults(fn=cmd_synth_alerts)
-    ig = sub.add_parser("integration", help="Lark / Jira / 9router: seal a secret or run a connection test")
+    ig = sub.add_parser("integration", help="Lark / Jira / 9router / data sources: seal a secret or run a connection test")
     isub = ig.add_subparsers(dest="icmd", required=True)
     ss = isub.add_parser("set-secret", help="read the secret value from stdin")
-    ss.add_argument("--integration", choices=("lark", "jira", "ai"), required=True)
+    ss.add_argument("--integration", choices=NAMES, required=True)
     ss.add_argument("--name", required=True)
     ss.add_argument("--actor", required=True, help="who is doing this (recorded in the ledger)")
     ss.set_defaults(fn=cmd_integration_set_secret)
     it = isub.add_parser("test", help="run the connection test; exit 1 unless every test passes")
-    it.add_argument("--integration", choices=("lark", "jira", "ai"))
+    it.add_argument("--integration", choices=NAMES)
     it.add_argument("--actor", required=True)
     it.set_defaults(fn=cmd_integration_test)
     sc = sub.add_parser("scenario", help="sandbox only: end-to-end scenario runs (scenarios/*.yaml)")

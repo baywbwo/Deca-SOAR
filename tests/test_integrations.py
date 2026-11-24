@@ -20,7 +20,7 @@ from hypersoar.common import entity as entity_mod
 from hypersoar.common.config import ConfigError
 from hypersoar.console.auth import hash_password
 
-from helpers import ingest
+from helpers import PW, ingest, set_reauth
 
 KEY_HEX = "11" * 32
 ADMIN_PW = "integration-admin-pw-for-tests"
@@ -58,6 +58,8 @@ def principals(conn):
             t = secrets.token_urlsafe(24)
             service.create_principal(conn, name, kind, role, t, "test")
             toks[name] = {"Authorization": f"Bearer {t}"}
+            if kind == "human":
+                set_reauth(conn, name)
     return toks
 
 

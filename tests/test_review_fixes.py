@@ -17,7 +17,7 @@ from hypersoar.common.db import make_pool
 from hypersoar.common.pii import Tokenizer, Vault, VaultWriter, canonical_ip, vault_public_key
 from hypersoar.gateway.normalize import normalize
 
-from helpers import ingest, waf_alert
+from helpers import PW, ingest, waf_alert
 from test_broker_api import _alert, body, client, env, principals  # noqa: F401  (fixtures)
 
 KEY = b"\x01" * 32
@@ -256,10 +256,10 @@ def test_kill_switch_blocks_request_and_approval(client, principals, pool, setti
                params={"access_key_token": alert["entities"]["access_key_token"]})
     j = client.post("/v1/actions/requests", headers=principals["analyst1"], json=req).json()
     assert j["status"] == "pending_approval"
-    ks = {"scope": "ram.access_key.disable", "engaged": True}
+    ks = {"scope": "ram.access_key.disable", "engaged": True, "password": PW, "reason": "drill"}
     assert client.post("/v1/kill-switch", headers=principals["admin1"], json=ks).status_code == 200
     r = client.post(f"/v1/actions/requests/{j['request_id']}/approval", headers=principals["approver1"],
-                    json={"approve": True})
+                    json={"approve": True, "password": PW})
     assert r.status_code == 409 and "kill switch" in r.text
     req["idempotency_key"] = "after-kill-1"
     k = client.post("/v1/actions/requests", headers=principals["analyst1"], json=req).json()
@@ -268,7 +268,7 @@ def test_kill_switch_blocks_request_and_approval(client, principals, pool, setti
     assert last["kill_switch"] is True and last["status"] == "rejected"
     # Denying stays possible while the switch is engaged.
     d = client.post(f"/v1/actions/requests/{j['request_id']}/approval", headers=principals["approver1"],
-                    json={"approve": False})
+                    json={"approve": False, "password": PW})
     assert d.status_code == 200 and d.json()["status"] == "rejected"
 
 

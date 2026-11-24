@@ -201,7 +201,7 @@ sudo cp deploy/deca/systemd/deca-ledger-anchor.* /etc/systemd/system/ && sudo sy
 - Temporal: hentikan `temporal-server`, ganti `TEMPORAL_BIN_DIR` ke versi sebelumnya. Upgrade skema tidak bisa
   di-downgrade, jadi ambil snapshot RDS `temporal*` sebelum upgrade versi server.
 - Migrasi DECA hanya menambah; ledger append-only tidak pernah di-rollback.
-- Darurat: `hypersoar kill-switch on --principal <on-call>` (shadow tetap tercatat, aksi apa pun tidak dieksekusi).
+- Darurat: `hypersoar kill-switch on --principal <on-call> --reason "<alasan>"` (shadow tetap tercatat, aksi apa pun tidak dieksekusi).
 
 ## 8. Belum selesai di fase 0
 - Compose/Dockerfile belum pernah dijalankan dengan Docker; digest base image diisi saat build (preflight produksi

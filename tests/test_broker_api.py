@@ -8,7 +8,7 @@ from hypersoar import ledger
 from hypersoar.broker import service
 from hypersoar.common.config import ConfigError
 
-from helpers import ingest, waf_alert
+from helpers import PW, ingest, set_reauth, waf_alert
 
 
 @pytest.fixture
@@ -32,6 +32,8 @@ def principals(conn):
             t = secrets.token_urlsafe(24)
             service.create_principal(conn, name, kind, role, t, "test")
             toks[name] = {"Authorization": f"Bearer {t}"}
+            if kind == "human":
+                set_reauth(conn, name)
     return toks
 
 
@@ -155,12 +157,12 @@ def test_l2_approval_flow(client, principals, pool, settings, tmp_path, conn):
     j = r.json()
     assert j["status"] == "pending_approval" and j["level"] == "L2", j
     url = f"/v1/actions/requests/{j['request_id']}/approval"
-    assert client.post(url, headers=principals["worker-svc"], json={"approve": True}).status_code == 403
-    assert client.post(url, headers=principals["svc-admin"], json={"approve": True}).status_code == 403
-    assert client.post(url, headers=principals["viewer1"], json={"approve": True}).status_code == 403
-    r2 = client.post(url, headers=principals["approver1"], json={"approve": True})
+    assert client.post(url, headers=principals["worker-svc"], json={"approve": True, "password": PW}).status_code == 403
+    assert client.post(url, headers=principals["svc-admin"], json={"approve": True, "password": PW}).status_code == 403
+    assert client.post(url, headers=principals["viewer1"], json={"approve": True, "password": PW}).status_code == 403
+    r2 = client.post(url, headers=principals["approver1"], json={"approve": True, "password": PW})
     assert r2.status_code == 200 and r2.json()["status"] == "validated" and r2.json()["executed_at"] is None
-    assert client.post(url, headers=principals["approver1"], json={"approve": True}).status_code == 409
+    assert client.post(url, headers=principals["approver1"], json={"approve": True, "password": PW}).status_code == 409
     assert "LTAI5tAbCdEfGhIjKlMn" not in str(conn.execute("SELECT json_agg(canonical) a FROM ledger.entry")
                                              .fetchone())
 
@@ -173,7 +175,7 @@ def test_self_approval_forbidden(client, principals, pool, settings, tmp_path, c
                     json=body(aid, action="ram.access_key.disable", conf=0.9,
                               params={"access_key_token": alert["entities"]["access_key_token"]})).json()
     r = client.post(f"/v1/actions/requests/{j['request_id']}/approval", headers=principals["approver1"],
-                    json={"approve": True})
+                    json={"approve": True, "password": PW})
     assert r.status_code == 403 and "own request" in r.text
 
 
@@ -181,7 +183,7 @@ def test_role_permissions(client, principals, waf):
     aid, ip_tok = waf
     req = body(aid, params={"ip_token": ip_tok, "waf_instance": "w1"})
     assert client.post("/v1/actions/requests", headers=principals["viewer1"], json=req).status_code == 403
-    ks = {"scope": "global", "engaged": True}
+    ks = {"scope": "global", "engaged": True, "password": PW, "reason": "drill"}
     for who in ("viewer1", "analyst1", "approver1", "worker-svc", "svc-admin"):
         assert client.post("/v1/kill-switch", headers=principals[who], json=ks).status_code == 403, who
     assert client.post("/v1/kill-switch", headers=principals["admin1"], json=ks).status_code == 200
