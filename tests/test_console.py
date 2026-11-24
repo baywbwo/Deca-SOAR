@@ -196,7 +196,7 @@ def test_security_headers(console):
     h = r.headers
     assert "script-src 'self'" in h["content-security-policy"] and "unsafe-inline" not in h["content-security-policy"]
     assert h["x-frame-options"] == "DENY" and h["x-content-type-options"] == "nosniff"
-    assert h["referrer-policy"] == "no-referrer" and h["cache-control"] == "no-store"
+    assert h["referrer-policy"] == "same-origin" and h["cache-control"] == "no-store"
     assert "strict-transport-security" in h
     assert "<script" not in r.text and "style=" not in r.text
 

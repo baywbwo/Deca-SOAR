@@ -43,7 +43,9 @@ SECURITY_HEADERS = {
     "content-security-policy": CSP,
     "x-frame-options": "DENY",
     "x-content-type-options": "nosniff",
-    "referrer-policy": "no-referrer",
+    # same-origin, not no-referrer: with no-referrer browsers send "Origin: null" on form POSTs, which
+    # the same-origin check on /login and /logout must reject. Cross-origin requests still get no referrer.
+    "referrer-policy": "same-origin",
     "strict-transport-security": "max-age=31536000",
     "cross-origin-opener-policy": "same-origin",
     "cross-origin-resource-policy": "same-origin",
