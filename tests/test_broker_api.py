@@ -12,8 +12,8 @@ from helpers import ingest, waf_alert
 
 
 @pytest.fixture
-def env(monkeypatch, settings):
-    monkeypatch.setenv("DECA_DB_URL", settings.db_url)
+def env(monkeypatch, settings, roles):
+    monkeypatch.setenv("DECA_DB_URL", roles["broker"])
     monkeypatch.setenv("DECA_VAULT_PRIVATE_KEY", settings.vault_private_key.hex())
     monkeypatch.setenv("DECA_ALLOW_TEST_NETS", "1")
     monkeypatch.setenv("DECA_POLICY_DIR", str(settings.policy_dir))

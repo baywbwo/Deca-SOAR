@@ -70,6 +70,19 @@ def db_url(pg_server, template_db):
         c.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
 
 
+def make_login(pg_server: str, db_url: str, group: str) -> str:
+    """A fresh LOGIN user that is a member of one NOLOGIN group role (RUNBOOK step 2)."""
+    user = f"{group.removeprefix('deca_soar_')}_{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(pg_server, autocommit=True) as c:
+        c.execute(f'CREATE ROLE "{user}" LOGIN IN ROLE {group}')
+    return db_url.replace("postgres@", f"{user}@", 1)
+
+
+@pytest.fixture
+def roles(pg_server, db_url):
+    return {g: make_login(pg_server, db_url, f"deca_soar_{g}") for g in ("gateway", "broker", "auditor")}
+
+
 @pytest.fixture
 def conn(db_url):
     with psycopg.connect(db_url, row_factory=dict_row, autocommit=True) as c:

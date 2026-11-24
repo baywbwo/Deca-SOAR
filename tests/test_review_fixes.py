@@ -127,18 +127,6 @@ def test_f2_production_refuses_test_nets(env, principals):
 
 # F3: least-privilege DB roles and anchors -------------------------------------------------------
 
-def _login(pg_server, db_url, group: str) -> str:
-    user = f"{group.removeprefix('deca_soar_')}_{uuid.uuid4().hex[:8]}"
-    with psycopg.connect(pg_server, autocommit=True) as c:
-        c.execute(f'CREATE ROLE "{user}" LOGIN IN ROLE {group}')
-    return db_url.replace("postgres@", f"{user}@", 1)
-
-
-@pytest.fixture
-def roles(pg_server, db_url):
-    return {g: _login(pg_server, db_url, f"deca_soar_{g}") for g in ("gateway", "broker", "auditor")}
-
-
 TAMPER = [
     "DELETE FROM ledger.entry",
     "UPDATE ledger.entry SET actor = 'x'",
@@ -206,9 +194,9 @@ def _owner_rewrite(conn):
         conn.execute("ALTER TABLE ledger.entry ENABLE TRIGGER USER")
 
 
-def test_f3_anchor_detects_owner_rewrite(pool, settings, tmp_path, conn, monkeypatch, capsys):
+def test_f3_anchor_detects_owner_rewrite(pool, settings, tmp_path, conn, roles, monkeypatch, capsys):
     ingest(pool, settings, tmp_path, [waf_alert(), waf_alert(ip="203.0.113.50")])
-    monkeypatch.setenv("DECA_DB_URL", settings.db_url)
+    monkeypatch.setenv("DECA_DB_URL", roles["auditor"])
     sink = f"file:{tmp_path / 'anchors.ndjson'}"
     assert cli.main(["anchor-ledger", "--sink", sink]) == 0
     rec = json.loads(capsys.readouterr().out)
@@ -226,8 +214,8 @@ def test_f3_anchor_detects_owner_rewrite(pool, settings, tmp_path, conn, monkeyp
     capsys.readouterr()
 
 
-def test_f3_sls_sink_is_marked_untested(monkeypatch, settings, capsys):
-    monkeypatch.setenv("DECA_DB_URL", settings.db_url)
+def test_f3_sls_sink_is_marked_untested(monkeypatch, roles, capsys):
+    monkeypatch.setenv("DECA_DB_URL", roles["auditor"])
     assert cli.main(["anchor-ledger", "--sink", "sls:deca-soar/ledger-anchor"]) == 2
     assert "not implemented or tested" in capsys.readouterr().err
 

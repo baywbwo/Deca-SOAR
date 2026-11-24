@@ -16,8 +16,9 @@ from deca_soar import ledger
 from deca_soar.ledger.anchor import SinkError, open_sink
 from deca_soar.broker import service
 from deca_soar.broker.roles import ROLES
-from deca_soar.common.config import read_secret
+from deca_soar.common.config import ConfigError, read_secret
 from deca_soar.common.db import MIGRATIONS_DIR, migrate
+from deca_soar.common.dbguard import assert_least_privilege_login
 
 
 def _db_url() -> str:
@@ -67,13 +68,14 @@ def cmd_anchor_ledger(a: argparse.Namespace) -> int:
     try:
         sink = open_sink(a.sink)
         with psycopg.connect(_db_url(), row_factory=dict_row) as conn:
+            assert_least_privilege_login(conn, "auditor")
             r, rec = ledger.anchor_record(conn)
             anchor_errors = ledger.check_anchors(conn, sink.read())
         if not r.ok or anchor_errors:
             print(json.dumps({"ok": False, "anchored": False, "errors": r.errors + anchor_errors}))
             return 1
         sink.append(rec)
-    except SinkError as e:
+    except (SinkError, ConfigError) as e:
         print(str(e), file=sys.stderr)
         return 2
     print(json.dumps({"ok": True, "anchored": True, **rec}))

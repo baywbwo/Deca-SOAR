@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from deca_soar.common.config import Settings
 from deca_soar.common.db import make_pool
+from deca_soar.common.dbguard import assert_least_privilege_login
 from deca_soar.gateway.service import Deliver, forward_once, pull_once
 from deca_soar.gateway.sources import ReplayFileSource
 from deca_soar.gateway.starter import TemporalStarter
@@ -49,6 +50,12 @@ def run_loop(stop: threading.Event, pool, settings: Settings, source, deliver: D
 async def lifespan(app: FastAPI):
     settings = Settings.for_gateway()
     pool = make_pool(settings.db_url)
+    try:
+        with pool.connection() as conn:
+            assert_least_privilege_login(conn, "gateway")
+    except BaseException:
+        pool.close()
+        raise
     starter = TemporalStarter(TemporalSettings.from_env(), identity=f"deca-gateway@{os.uname().nodename}")
     stop = threading.Event()
     t = threading.Thread(

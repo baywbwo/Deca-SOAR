@@ -17,6 +17,7 @@ from deca_soar.broker import roles, service
 from deca_soar.broker.roles import Principal
 from deca_soar.common.config import ConfigError, Settings, assert_no_write_credentials
 from deca_soar.common.db import make_pool
+from deca_soar.common.dbguard import assert_least_privilege_login
 from deca_soar.common.http import DEFAULT_MAX_BODY, BodyLimit
 from deca_soar.common.pii import Vault
 
@@ -74,7 +75,14 @@ async def lifespan(app: FastAPI):
         internal_cidrs=settings.internal_cidrs,
         allow_test_nets=allow_test_nets,
     )
-    app.state.pool = make_pool(settings.db_url)
+    pool = make_pool(settings.db_url)
+    try:
+        with pool.connection() as conn:
+            assert_least_privilege_login(conn, "broker")
+    except BaseException:
+        pool.close()
+        raise
+    app.state.pool = pool
     log.info("broker ready: %d actions, mode=shadow", len(cat))
     yield
     app.state.pool.close()
