@@ -114,9 +114,6 @@ def static_deca_compose() -> None:
         check(all(env.get(k) for k in ("DECA_TEMPORAL_TLS_CA_FILE", "DECA_TEMPORAL_TLS_CERT_FILE", "DECA_TEMPORAL_TLS_KEY_FILE")),
               f"deca compose: {name} uses mTLS to Temporal")
         check(bool(env.get("DECA_TEMPORAL_PAYLOAD_KEY_FILE")), f"deca compose: {name} encrypts Temporal payloads")
-    dockerfile = (ROOT / "deploy/deca/Dockerfile").read_text()
-    check("REPLACE_WITH_PINNED_DIGEST" not in dockerfile, "Dockerfile: base image pinned by digest (pin before build)",
-          warn=True)
 
 
 def static_temporal() -> None:
@@ -170,6 +167,76 @@ def temporal_binaries(bin_dir: Path) -> None:
     dc = subprocess.run([str(server), "validate-dynamic-config", str(TEMPORAL_DIR / "dynamicconfig/production.yaml")],
                         capture_output=True, text=True, timeout=60)
     check(dc.returncode == 0 and "warning" not in (dc.stdout + dc.stderr).lower(), "temporal dynamic config: valid keys only")
+
+
+LOCK_DIR = ROOT / "deploy/deca/requirements"
+DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def parse_lock(text: str) -> dict[str, tuple[str, int]]:
+    """name -> (version, number of sha256 hashes); a requirement that is not `name==version` maps to ('', 0)."""
+    pins: dict[str, tuple[str, int]] = {}
+    current = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("--hash=sha256:"):
+            if current and re.fullmatch(r"--hash=sha256:[0-9a-f]{64}( \\)?", line):
+                v, n = pins[current]
+                pins[current] = (v, n + 1)
+            continue
+        m = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9.+!-]+)( \\)?", line)
+        current = _norm(m.group(1)) if m else line
+        pins[current] = (m.group(2), 0) if m else ("", 0)
+    return pins
+
+
+def static_locks(lock_dir: Path = LOCK_DIR, pyproject: Path = ROOT / "pyproject.toml",
+                 dockerfile: Path = ROOT / "deploy/deca/Dockerfile") -> None:
+    """Review N3: every Python dependency of the image is pinned with == and sha256 hashes."""
+    locks = {}
+    for name in ("runtime", "build", "dev"):
+        p = lock_dir / f"{name}.lock"
+        locks[name] = parse_lock(p.read_text()) if p.exists() else {}
+        bad = sorted(k for k, (v, n) in locks[name].items() if not v or n == 0)
+        check(bool(locks[name]) and not bad, f"lock {name}.lock: every package pinned with == and sha256"
+              + (f" (bad: {bad[:5]})" if bad else ""))
+    import tomllib
+    proj = tomllib.loads(pyproject.read_text())["project"]
+    dep = lambda d: _norm(re.split(r"[\s\[<>=!~;]", d, maxsplit=1)[0])  # noqa: E731
+    missing = sorted({dep(d) for d in proj["dependencies"]} - set(locks["runtime"]))
+    check(not missing, "lock runtime.lock: covers every pyproject dependency" + (f" (missing: {missing})" if missing else ""))
+    dev_missing = sorted({dep(d) for d in proj.get("optional-dependencies", {}).get("dev", [])} - set(locks["dev"]))
+    drift = sorted(k for k, v in locks["runtime"].items() if locks["dev"].get(k, v)[0] != v[0])
+    check(not dev_missing and set(locks["runtime"]) <= set(locks["dev"]) and not drift,
+          "lock dev.lock: runtime pins + test tools, same versions")
+    check("hatchling" in locks["build"], "lock build.lock: pins the build backend")
+    script = (lock_dir / "install-locked.sh").read_text() if (lock_dir / "install-locked.sh").exists() else ""
+    check(all(f in script for f in ("--require-hashes", "--no-deps", "--only-binary :all:", "--no-build-isolation",
+                                    "--no-index")), "install-locked.sh: hash-checked, wheel-only, offline wheel build")
+    df = dockerfile.read_text()
+    runs = re.findall(r"^RUN .*$", df, re.M)
+    check(any("install-locked.sh" in r for r in runs) and not any(re.search(r"pip3? install", r) for r in runs),
+          "Dockerfile: Python packages only via install-locked.sh")
+    froms = re.findall(r"^FROM (\S+)", df, re.M)
+    check(len(froms) == 2 and set(froms) == {"${BASE_IMAGE}"} and "@sha256:[0-9a-f]{64}$" in df,
+          "Dockerfile: both stages FROM ${BASE_IMAGE}, build refuses an unpinned BASE_IMAGE")
+
+
+def base_image(production: bool, deca_env: Path | None, dockerfile: Path = ROOT / "deploy/deca/Dockerfile") -> None:
+    """Review N3: the base image digest is filled in at build time; production refuses the placeholder."""
+    m = re.search(r"^ARG BASE_IMAGE=(\S+)", dockerfile.read_text(), re.M)
+    value = m.group(1) if m else ""
+    if deca_env is not None:
+        value = parse_env(deca_env).get("DECA_BASE_IMAGE", value)
+    ok = bool(DIGEST_RE.match(value)) and "REPLACE" not in value
+    check(ok, "image: DECA_BASE_IMAGE pinned by sha256 digest" + ("" if production else " (fill in at build time)"),
+          warn=not production)
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -270,9 +337,14 @@ def main() -> int:
     ap.add_argument("--env", type=Path, help="production deca.env")
     ap.add_argument("--temporal-env", type=Path, help="production temporal.env")
     ap.add_argument("--secrets-dir", type=Path)
+    ap.add_argument("--production", action="store_true",
+                    help="production gate: placeholders FAIL instead of WARN (implied by --env/--secrets-dir)")
     a = ap.parse_args()
+    production = a.production or bool(a.env or a.secrets_dir)
     static_repo()
     static_deca_compose()
+    static_locks()
+    base_image(production, a.env)
     static_temporal()
     if a.temporal_bin:
         temporal_binaries(a.temporal_bin)
