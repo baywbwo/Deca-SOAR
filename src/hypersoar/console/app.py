@@ -45,7 +45,7 @@ MAX_BODY = 4096
 PAGES = {"/": "overview.html", "/map": "map.html", "/cases": "cases.html", "/approvals": "approvals.html",
          "/automation": "automation.html", "/scenarios": "scenarios.html"}
 STATIC_FILES = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8",
-                "intercept.svg": "image/svg+xml", "worldmap.svg": "image/svg+xml",
+                "intercept.svg": "image/svg+xml", "worldmap.svg": "image/svg+xml", "icon.svg": "image/svg+xml",
                 "geist-sans.woff2": "font/woff2", "geist-mono.woff2": "font/woff2"}
 CASE_ID = re.compile(r"^CS-[0-9]{1,9}$")
 
@@ -189,7 +189,7 @@ def _login_page(request: Request, status: int = 200, msg: str | None = None) -> 
         '<span class="env prd">Production</span>' if mode == "production" else '<span class="env sbx">Sandbox</span>')
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in · HyperSoar Console</title><link rel="stylesheet" href="/static/console.css"></head>
+<title>Sign in · HyperSoar Console</title><link rel="icon" href="/static/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/console.css"></head>
 <body class="gate">
 <div class="art" aria-hidden="true"></div>
 <main class="gate-panel">

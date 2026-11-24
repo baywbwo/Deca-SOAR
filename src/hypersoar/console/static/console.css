@@ -554,3 +554,5 @@ td.mono { white-space: nowrap; }
   .ttl-row .r { text-align: left; }
   .ttl-row > span:first-child { overflow-wrap: anywhere; }
 }
+#a-pills { flex-wrap: wrap; }
+#a-title, .diff div, .chain li { overflow-wrap: anywhere; min-width: 0; }

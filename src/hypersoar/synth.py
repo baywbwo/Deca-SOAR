@@ -60,6 +60,7 @@ TRUTH = {"benign_scan": "benign"}
 WEIGHTS = {"account_takeover": 20, "web_attack": 30, "ssh_bruteforce": 20, "protected_source": 10, "benign_scan": 20}
 SERVICE_USERS = ("svc-settlement-report", "svc-recon-batch", "ci-deployer")
 AK_EVERY_S = 7200            # ram.access_key.disable is limited to 1/hour: leave room for scenario runs
+AK_FIRST_S = 1800            # nor at start-up: a scenario run right after a deploy needs that quota
 MAX_ACTIVE = 2
 
 
@@ -108,15 +109,16 @@ class Campaign:
 class Seeder:
     """Deterministic for a given seed: the same campaign order and the same values."""
 
-    def __init__(self, seed: int | None, step_gap_s: float, ak_every_s: float = AK_EVERY_S):
+    def __init__(self, seed: int | None, step_gap_s: float, ak_every_s: float = AK_EVERY_S,
+                 ak_first_s: float = AK_FIRST_S):
         self.rng = random.Random(seed)
         self.gap = step_gap_s
         self.ak_every = ak_every_s
         self.active: list[Campaign] = []
-        self.last_ak: float | None = None
+        self.last_ak = ak_first_s - ak_every_s
 
     def _start(self, now: float) -> None:
-        if self.last_ak is None or now - self.last_ak >= self.ak_every:
+        if now - self.last_ak >= self.ak_every:
             kind = "ak_lateral"
             self.last_ak = now
         else:

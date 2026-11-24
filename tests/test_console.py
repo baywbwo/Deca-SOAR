@@ -221,11 +221,11 @@ def test_static_has_no_inline_code_and_unknown_files_404(console):
     assert console.get("/static/console.js").status_code == 200
     assert console.get("/static/../app.py").status_code == 404
     assert console.get("/static/index.html").status_code == 404
-    for name, mime in [("intercept.svg", "image/svg+xml"), ("worldmap.svg", "image/svg+xml"),
+    for name, mime in [("intercept.svg", "image/svg+xml"), ("worldmap.svg", "image/svg+xml"), ("icon.svg", "image/svg+xml"),
                        ("geist-sans.woff2", "font/woff2"), ("geist-mono.woff2", "font/woff2")]:
         r = console.get(f"/static/{name}")
         assert r.status_code == 200 and r.headers["content-type"].startswith(mime)
-    for name in ("intercept.svg", "worldmap.svg"):
+    for name in ("intercept.svg", "worldmap.svg", "icon.svg"):
         art = (STATIC / name).read_text()
         assert "<script" not in art and "href=\"http" not in art and "url(http" not in art and " on" not in art.lower()
 
@@ -385,6 +385,7 @@ def test_seeding_bot_paces_the_l2_access_key_chain():
         starts += [t for a in s.tick(t) if a["rule_id"] == "actiontrail.ak_unusual_ip"]
         t += 120
     assert len(starts) == 3 and all(b - a >= synth.AK_EVERY_S for a, b in zip(starts, starts[1:]))
+    assert starts[0] >= synth.AK_FIRST_S  # never at start-up
 
 
 def test_synthetic_run_appends_whole_lines(tmp_path):
@@ -392,12 +393,19 @@ def test_synthetic_run_appends_whole_lines(tmp_path):
     n = synth.run(out, 0, 6, seed=3, log=lambda m: None)
     lines = out.read_text().splitlines()
     assert n == 6 and len(lines) == 6
-    # The first campaign is always the AccessKey chain, the second one of the weighted others.
-    assert json.loads(lines[0])["rule_id"] == "actiontrail.ak_unusual_ip"
-    assert {json.loads(x)["campaign"] for x in lines} >= {"ak_lateral"}
+    # No AccessKey chain at start-up: its 1/hour quota stays free for a scenario run after a deploy.
+    assert "ak_lateral" not in {json.loads(x)["campaign"] for x in lines}
 
 
 def test_expiring_shows_the_target_not_the_whole_call():
     from hypersoar.console.views import _target
     assert _target("waf.ip_blacklist.add(ip_token=tok_ip_98fd, ttl_s=86400, waf_instance=waf-jkt-01)") == "tok_ip_98fd"
     assert _target("noop") == "noop" and _target(None) is None
+
+
+def test_every_page_links_the_icon_so_the_browser_never_asks_for_favicon_ico(console):
+    from hypersoar.console.app import STATIC
+    link = '<link rel="icon" href="/static/icon.svg" type="image/svg+xml">'
+    for name in PAGES.values():
+        assert link in (STATIC / f"{name}.html").read_text()
+    assert link in console.get("/login").text

@@ -75,6 +75,19 @@
   const sevTag = (p, sev) => el("span", { class: `sev ${sev || "low"}`, text: p ? `${p} ${sev}` : sev || "–" });
   const KIND = { ip: "Source IP", user: "Principal", ak: "AccessKey", asset: "Asset" };
   const VERDICT_TAG = { malicious: "hot", suspicious: "wait", benign: "ok" };
+  // Plain-language request titles, as in the mockup ("Disable AccessKey ... owned by ...").
+  const ACTION_TITLE = {
+    "case.close_benign": "Close case as benign", "itsm.create_ticket": "Create ITSM ticket",
+    "waf.ip_blacklist.add": "Block source IP", "waf.rate_limit.tighten": "Tighten WAF rate limit on",
+    "ram.user.console_session.revoke": "Revoke console sessions of", "ram.access_key.disable": "Disable AccessKey",
+    "ram.policy.detach": "Detach RAM policy from", "ecs.security_group.isolate": "Isolate ECS instance",
+  };
+  const callTarget = call => {
+    const m = /^[^(]*\(([^,)]*)/.exec(call || "");
+    return m ? m[1].split("=").pop().trim() : "";
+  };
+  const requestTitle = r => ACTION_TITLE[r.action] ? `${ACTION_TITLE[r.action]} ${callTarget(r.would_execute)}`.trim()
+    : r.would_execute || r.action;
 
   // -- API ------------------------------------------------------------------------------------------------
   class LoginRequired extends Error {}
@@ -798,7 +811,7 @@
       fill("a-pills", el("span", { class: "eyebrow mono", text: shortId(r.id) }), el("span", { class: "tag wait", text: "Needs approval" }),
         el("span", { class: "tag lv", text: r.level }), el("span", { class: "sp" }), el("span", { class: "k", text: "From case" }),
         r.case_id ? el("a", { class: "mono", href: `/cases#${r.case_id}`, text: r.case_id }) : el("span", { class: "mono", text: "–" }));
-      txt("a-title", r.would_execute || r.action);
+      txt("a-title", requestTitle(r));
       txt("a-lede", `Proposed by AI triage, checked by the broker. ${r.case_id ? `Case ${r.case_id}: ${r.case_title}.` : ""}`);
       const ai = r.ai || {};
       fill("a-score",
