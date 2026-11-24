@@ -65,7 +65,8 @@ login asli); preflight FAIL bila DSN aplikasi memuat `options` atau env memuat v
 sudo install -d -m 0700 /etc/deca-soar/secrets
 sudo install -d -m 0755 /etc/deca-soar/tls /etc/deca-soar/temporal/tls
 sudo .venv/bin/python scripts/gen_secrets.py /etc/deca-soar/secrets
-#   -> deca_tokenization_key, deca_vault_public_key, deca_vault_private_key, deca_temporal_payload_key (0600, tidak menimpa)
+#   -> deca_tokenization_key, deca_vault_public_key, deca_vault_private_key, deca_temporal_payload_key,
+#      deca_integration_key (0600, tidak menimpa)
 ```
 File secret lain (isi dari vault ops / PKI):
 
@@ -81,8 +82,8 @@ File secret lain (isi dari vault ops / PKI):
 | `tls/temporal-server-ca.pem`, `tls/temporal-{gateway,worker}.pem`, `secrets/temporal-{gateway,worker}.key` | klien mTLS | gateway / worker |
 | `rds-ca.pem` | CA RDS **[A]** | Temporal, DECA |
 
-Backup terpisah dan wajib: `deca_vault_private_key`, `deca_tokenization_key`, `deca_temporal_payload_key`
-(tanpa key, token PII dan history workflow tidak bisa dibuka). File yang dibaca uid 10001 di container: 0440 root:10001.
+Backup terpisah dan wajib: `deca_vault_private_key`, `deca_tokenization_key`, `deca_temporal_payload_key`,
+`deca_integration_key` (tanpa key, token PII, history workflow dan secret Lark/Jira/9router tidak bisa dibuka). File yang dibaca uid 10001 di container: 0440 root:10001.
 
 ## 4. Temporal server (systemd)
 ```sh

@@ -1,0 +1,31 @@
+# Leaked AccessKey used from an unusual IP, then discovery, lateral movement and collection.
+# The broker must ask for an L2 AccessKey disable (approval, TTL at most 30 min, Lark card to the
+# on-call analysts) and refuse a second one inside the hour. One Jira issue for the whole case.
+version: 1
+id: ak-lateral-movement
+title: Leaked AccessKey, lateral movement to OSS (L2 approval)
+quota: ram.access_key.disable
+timeout_s: 240
+alerts:
+  - {source: actiontrail, rule_id: actiontrail.ak_unusual_ip, severity_hint: critical, src_ip: "{ip}", principal: "{svc}", access_key_id: "{ak}", events: 2}
+  - {source: actiontrail, rule_id: actiontrail.protected_asset_probe, severity_hint: high, src_ip: "{ip}", principal: "{svc}", access_key_id: "{ak}", dst_asset: ecs-pay-01, events: 6}
+  - {source: actiontrail, rule_id: actiontrail.ram.assume_role_denied, severity_hint: high, src_ip: "{ip}", principal: "{svc}", access_key_id: "{ak}", dst_asset: ram-console, events: 3}
+  - {source: actiontrail, rule_id: actiontrail.oss.bulk_read, severity_hint: critical, src_ip: "{ip}", principal: "{svc}", access_key_id: "{ak}", dst_asset: oss-backup, events: 41}
+expect:
+  case:
+    category: Cloud key misuse
+    tactics: [TA0001, TA0007, TA0008, TA0009]
+    techniques: [T1078.004, T1526, T1550.001, T1530]
+    outcomes: [allowed, blocked, blocked, allowed]
+    origin: true
+  relations:
+    - [ip, uses_key, ak]
+    - [ak, moves_to, asset]
+    - [ak, targets, asset]
+    - [user, owns_key, ak]
+  ai: {verdicts: [malicious]}
+  requests:
+    - {action: ram.access_key.disable, status: pending_approval, level: L2, ttl_min: 30}
+    - {action: ram.access_key.disable, status: rejected, reason: rate limit}
+  lark: [lark.case_notify, lark.approval_card]
+  jira: {issues: 1}

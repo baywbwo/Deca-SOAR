@@ -3,7 +3,8 @@
 #   docker compose -p deca-lab -f deploy/deca/docker-compose.yml -f deploy/lab/docker-compose.lab.yml \
 #     --env-file /etc/deca-soar/deca.env up -d
 # Stand-ins: postgres (RDS), temporal (the systemd Temporal host), synth (SLS detection results, synthetic),
-# the anchor file stays local (no Logtail/SLS). LLM triage stays mock. Additions for the owner: console
+# the anchor file stays local (no Logtail/SLS). The database is a sandbox install (HYPERSOAR_MODE=sandbox):
+# Lark, Jira and 9router are mocks, and `scenario` (profile tools) plays scenarios/*.yaml end to end. Additions for the owner: console
 # (read-only SOC view) behind a Cloudflare quick tunnel; nothing here publishes a host port.
 # Postgres, Temporal and the broker are reachable only inside the deca-lab network (review N1/N5).
 x-hardened: &hardened
@@ -72,6 +73,7 @@ services:
       # protected.yaml still holds the repo's RFC5737 placeholders and the synthetic alerts use
       # TEST-NET addresses, both of which the broker refuses under HYPERSOAR_ENV=production.
       HYPERSOAR_ENV: lab
+      HYPERSOAR_MODE: sandbox
       HYPERSOAR_ALLOW_TEST_NETS: "1"
     secrets: [deca_db_ca]
     ports: !reset []
@@ -81,6 +83,11 @@ services:
       postgres: {condition: service_healthy}
 
   gateway:
+    # Sandbox install: HYPERSOAR_ENV=production would (rightly) refuse sandbox mode. The Temporal mTLS and
+    # payload key files of the base file stay set, so the gateway still uses them.
+    environment:
+      HYPERSOAR_ENV: lab
+      HYPERSOAR_MODE: sandbox
     secrets: [deca_db_ca]
     depends_on:
       postgres: {condition: service_healthy}
@@ -99,9 +106,37 @@ services:
     <<: *hardened
     image: ${HYPERSOAR_IMAGE:?e.g. hypersoar:<git-sha>}
     command: ["hypersoar", "synth-alerts", "--out", "/data/replay/alerts.ndjson",
-              "--interval", "${HYPERSOAR_LAB_SYNTH_INTERVAL_S:-90}"]
+              "--interval", "${HYPERSOAR_LAB_SYNTH_INTERVAL_S:-120}"]
+    environment:
+      HYPERSOAR_MODE: sandbox
     volumes: ["${HYPERSOAR_REPLAY_DIR:?}:/data/replay"]
     networks: [deca]
+
+  # Sandbox scenario runs (QA): `$C --profile tools run --rm scenario [--only <id>]`. Appends the scenario's
+  # synthetic alerts to the replay file, follows them through gateway, worker, broker and the mock
+  # integrations, and records each result in qa.scenario_run. Broker DB role: it reads cases and decisions
+  # and writes only qa.scenario_run, integration test runs and integration settings seeding.
+  scenario:
+    <<: *hardened
+    restart: "no"
+    profiles: [tools]
+    image: ${HYPERSOAR_IMAGE:?e.g. hypersoar:<git-sha>}
+    entrypoint: ["hypersoar", "scenario", "run", "--replay", "/data/replay/alerts.ndjson", "--actor", "lab-qa"]
+    command: []
+    environment:
+      HYPERSOAR_ENV: lab
+      HYPERSOAR_MODE: sandbox
+      HYPERSOAR_ENTITY: ${HYPERSOAR_ENTITY:-dob}
+      HYPERSOAR_DB_URL_FILE: /run/secrets/deca_db_url_broker
+      HYPERSOAR_POLICY_DIR: /etc/deca-soar/policy
+      HYPERSOAR_GIT_SHA: ${HYPERSOAR_GIT_SHA:-unknown}
+    secrets: [deca_db_url_broker, deca_db_ca]
+    volumes:
+      - "${HYPERSOAR_REPLAY_DIR:?}:/data/replay"
+      - "${HYPERSOAR_POLICY_HOST_DIR:?}:/etc/deca-soar/policy:ro"
+    networks: [deca]
+    depends_on:
+      postgres: {condition: service_healthy}
 
   console:
     <<: *hardened
@@ -149,6 +184,7 @@ volumes:
   pgdata: {}
 
 secrets:
+  deca_db_url_broker: {file: /etc/deca-soar/secrets/deca_db_url_broker}
   deca_db_ca: {file: /etc/deca-soar/tls/db-ca.pem}
   deca_db_url_console: {file: /etc/deca-soar/secrets/deca_db_url_console}
   console_password_hash: {file: /etc/deca-soar/secrets/console_password_hash}

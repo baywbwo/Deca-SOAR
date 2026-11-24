@@ -18,5 +18,10 @@ origins:
   - {cidr: 203.0.113.160/28, city: Lagos, country: NG, asn: AS37148, as_name: Globacom, tor: false, xy: [571.3, 268.1]}
   - {cidr: 203.0.113.176/28, city: Bucharest, country: RO, asn: AS9050, as_name: Telekom RO, tor: false, xy: [642.5, 121.5]}
   - {cidr: 203.0.113.192/28, city: Los Angeles, country: US, asn: AS20473, as_name: Vultr, tor: false, xy: [190.0, 161.5]}
+  # Kept for `hypersoar scenario run` (the seeding bot stays below .208), so a scenario never joins a
+  # case of the live feed. Same cities and map positions as above, other documentation blocks.
+  - {cidr: 203.0.113.208/28, city: Frankfurt, country: DE, asn: AS24940, as_name: Hetzner, tor: false, xy: [590.3, 100.1]}
+  - {cidr: 203.0.113.224/28, city: Ashburn, country: US, asn: AS14618, as_name: AWS, tor: false, xy: [323.7, 142.2]}
+  - {cidr: 203.0.113.240/28, city: Hanoi, country: VN, asn: AS7552, as_name: Viettel, tor: false, xy: [906.4, 212.0]}
   # On the protected list (partner bank placeholder): it still gets an origin, the broker still refuses it.
   - {cidr: 198.51.100.0/25, city: Singapore, country: SG, asn: AS45102, as_name: Alibaba, tor: false, xy: [906.0, 288.1]}

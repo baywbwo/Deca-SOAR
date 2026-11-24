@@ -60,7 +60,28 @@ def test_console_is_read_only_and_only_tunnel_is_trusted():
 def test_owner_override_adds_only_network_and_db_ca():
     doc = yaml.safe_load((LAB / "docker-compose.owner.lab.yml").read_text())
     job = doc["services"]["owner-job"]
-    assert set(job) == {"secrets", "networks"} and job["secrets"] == ["deca_db_ca"]
+    assert set(job) == {"environment", "secrets", "networks"} and job["secrets"] == ["deca_db_ca"]
+    assert job["environment"] == {"HYPERSOAR_ENV": "lab", "HYPERSOAR_MODE": "sandbox"}
     runner = (REPO / "deploy/deca/bin/deca-owner-run.sh").read_text()
     assert '${OVERRIDE:+-f "$OVERRIDE"}' in runner
 
+
+
+def test_lab_is_a_sandbox_install_and_keeps_the_service_controls():
+    svcs = _lab()["services"]
+    for name in ("broker", "gateway", "synth", "scenario"):
+        assert svcs[name]["environment"]["HYPERSOAR_MODE"] == "sandbox", name
+    # The gateway leaves HYPERSOAR_ENV=production only because that refuses sandbox mode; it does not
+    # drop the base file's Temporal mTLS or payload key.
+    assert set(svcs["gateway"]) == {"environment", "secrets", "depends_on"}
+    assert set(svcs["gateway"]["environment"]) == {"HYPERSOAR_ENV", "HYPERSOAR_MODE"}
+    assert "--interval" in svcs["synth"]["command"] and "120" in svcs["synth"]["command"][-1]
+
+
+def test_scenario_runner_is_a_tool_with_the_broker_login_only():
+    sc = _lab()["services"]["scenario"]
+    assert sc["profiles"] == ["tools"] and sc["restart"] == "no" and "ports" not in sc
+    assert sc["read_only"] is True and sc["cap_drop"] == ["ALL"]
+    assert set(sc["secrets"]) == {"deca_db_url_broker", "deca_db_ca"}
+    assert sc["environment"]["HYPERSOAR_DB_URL_FILE"] == "/run/secrets/deca_db_url_broker"
+    assert sc["entrypoint"][:3] == ["hypersoar", "scenario", "run"]

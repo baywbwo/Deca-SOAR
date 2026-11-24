@@ -23,6 +23,11 @@ RUN useradd --system --uid 10001 --home /nonexistent --shell /usr/sbin/nologin d
 COPY --from=build /opt/venv /opt/venv
 COPY migrations /app/migrations
 COPY policy /app/policy
+# Entity config, detections as code (G3), geo origins and sandbox scenarios; read relative to /app.
+COPY entities /app/entities
+COPY detections /app/detections
+COPY geo /app/geo
+COPY scenarios /app/scenarios
 ENV PATH=/opt/venv/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     HYPERSOAR_MIGRATIONS_DIR=/app/migrations HYPERSOAR_POLICY_DIR=/app/policy
 WORKDIR /app

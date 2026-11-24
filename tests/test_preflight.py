@@ -155,7 +155,7 @@ def _secrets(tmp_path: Path, owner: bool) -> Path:
     d.mkdir()
     k = X25519PrivateKey.generate()
     files = {
-        "deca_tokenization_key": "11" * 32, "deca_temporal_payload_key": "22" * 32,
+        "deca_tokenization_key": "11" * 32, "deca_temporal_payload_key": "22" * 32, "deca_integration_key": "33" * 32,
         "deca_vault_private_key": k.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()).hex(),
         "deca_vault_public_key": k.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
     }
@@ -260,3 +260,131 @@ def test_n1_expired_cert_fails(pf, tmp_path):
     root = _pki(tmp_path)
     pf.pki(root, now=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=95))
     assert any("currently valid" in m for m in _fails(pf))
+
+
+# Production database gate (--db-url-file) ---------------------------------------------------------
+
+def _prod_settings():
+    ladder = [{"role": r, "timeout_min": t, "approvers": [{"name": n, "lark_user_id": f"ou_{n.lower()}"}]}
+              for r, t, n in (("On-call analyst", 5, "Oncall"), ("SOC lead", 10, "Lead"), ("Head of IT", 15, "Head"))]
+    route = {"chat_id": "oc_socdob", "chat_name": "SOC DOB", "oncall_dm": False, "delivery": "now"}
+    return {
+        "lark": {"app_id": "cli_dobprod0001", "routing": {k: route for k in ("critical", "high", "medium", "low")},
+                 "ladder": ladder},
+        "jira": {"site": "https://dob-test.example.net", "email": "soar-bot@dob.example", "project": "SEC",
+                 "issue_type": "Security Incident", "title_template": "[{severity}] {case_id} {case_title}",
+                 "priority_map": {"critical": "Highest", "high": "High", "medium": "Medium", "low": "Low"},
+                 "sync": {"comment_on_update": True, "done_on_close": True, "close_case_on_done": False}},
+        "ai": {"base_url": "https://router.dob-test.example.net/v1", "triage_model": "deca-triage-v2",
+               "fallback_model": "deca-lite", "timeout_s": 20, "daily_token_limit": 2000000},
+    }
+
+
+def _live_stub(req):
+    import json as _json
+
+    import httpx
+    p = req.url.path
+    if p.endswith("/tenant_access_token/internal"):
+        return httpx.Response(200, json={"code": 0, "tenant_access_token": "t-dummy", "expire": 7200})
+    if p.endswith("/issuetypes"):
+        return httpx.Response(200, json={"issueTypes": [{"name": "Security Incident"}]})
+    if p.endswith("/priority"):
+        return httpx.Response(200, json=[{"name": n} for n in ("Highest", "High", "Medium", "Low")])
+    if p.startswith("/rest/api/3/"):
+        return httpx.Response(200, json={})
+    if p.endswith("/chat/completions"):
+        answer = {"verdict": "suspicious", "confidence": 0.7, "rationale_summary": "probe", "evidence_refs": []}
+        return httpx.Response(200, json={"choices": [{"message": {"content": _json.dumps(answer)}}],
+                                         "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+    return httpx.Response(404)
+
+
+@pytest.fixture
+def prod_db(pg_server):
+    """A fresh, empty database installed for production (no synthetic data, nothing seeded)."""
+    import uuid
+
+    import psycopg
+    from conftest import _with_db
+    from hypersoar.common.db import migrate
+    name = "p_" + uuid.uuid4().hex[:12]
+    with psycopg.connect(pg_server, autocommit=True) as c:
+        c.execute(f'CREATE DATABASE "{name}"')
+    url = _with_db(pg_server, name)
+    migrate(url, mode="production", entity_id="dob")
+    yield url
+    with psycopg.connect(pg_server, autocommit=True) as c:
+        c.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+
+
+def _fails(pf):
+    return [m for s, m in pf.results if s == "FAIL"]
+
+
+def test_db_gate_fails_on_the_sandbox_database(pf, db_url, conn):
+    from hypersoar.broker.integrations import config as int_config
+    from hypersoar.common import entity as entity_mod
+    with conn.transaction():
+        int_config.seed(conn, entity_mod.load(ROOT / "entities/dob.yaml", mode="sandbox"))
+        conn.execute("INSERT INTO gateway.alert_case (entity_id, case_id, case_no, title, category, max_severity,"
+                     " criticality, priority, primary_kind, primary_value, synthetic, opened_at, last_seen_at)"
+                     " VALUES ('dob', 'CS-1001', 1001, 't', 'c', 'high', 3, 12, 'ip', 'tok', true, now(), now())")
+    pf.database(db_url)
+    fails = _fails(pf)
+    assert "db: install mode is production (found sandbox)" in fails
+    assert "db: no synthetic cases or alerts (1 found)" in fails
+    for name in ("lark", "jira", "ai"):
+        assert f"db: {name} configured for production" in fails
+
+
+def test_db_gate_fails_on_mock_placeholder_untested(pf, prod_db):
+    import psycopg
+    from psycopg.rows import dict_row
+    with psycopg.connect(prod_db, row_factory=dict_row) as c, c.transaction():
+        for name, s in _prod_settings().items():
+            # written directly: the broker's own validation refuses mock in production
+            c.execute("INSERT INTO broker.integration_config (entity_id, integration, mode, target, settings,"
+                      " updated_by) VALUES ('dob', %s, 'production', 'mock', %s, 'test')",
+                      (name, psycopg.types.json.Jsonb({**s, "note": "REPLACE"} if name == "ai" else s)))
+    pf.database(prod_db)
+    fails = _fails(pf)
+    assert "db: lark target is live (found mock)" in fails
+    assert any(m.startswith("db: ai settings have no placeholder") for m in fails)
+    assert "db: jira required secrets set (api_token missing)" in fails
+    assert "db: lark latest connection test passed for settings v1" in fails
+
+
+def test_db_gate_passes_on_empty_production_db_with_dummy_secrets(pf, prod_db, monkeypatch):
+    """Live endpoints are stubbed (httpx MockTransport): this proves the gate, not real connectivity."""
+    import httpx
+    import psycopg
+    from psycopg.rows import dict_row
+    from hypersoar.broker.integrations import config as int_config
+    from hypersoar.broker.integrations import secretbox
+    from hypersoar.broker.integrations.hub import Hub
+    from hypersoar.common import entity as entity_mod
+    monkeypatch.setenv("HYPERSOAR_MODE", "production")
+    box = secretbox.SecretBox(b"\x11" * 32)
+    connect = lambda: psycopg.connect(prod_db, row_factory=dict_row)  # noqa: E731
+    with connect() as c, c.transaction():
+        for name, s in _prod_settings().items():
+            int_config.save(c, "dob", name, "production", "live", True, s, "test")
+            for sec in pf.INTEGRATION_SECRETS[name]:
+                secretbox.set_secret(c, box, "dob", name, "production", sec, f"dummy-{sec}-value", "test")
+    ent = entity_mod.load(ROOT / "entities/dob.yaml", mode="production")
+    hub = Hub(entity=ent, mode="production", box=box,
+              transports={n: httpx.MockTransport(_live_stub) for n in ("lark", "jira", "ai")})
+    for name in ("lark", "jira", "ai"):
+        r = hub.test(connect, name, "test")
+        assert r["status"] == "pass", r
+    pf.database(prod_db)
+    assert _fails(pf) == []
+    assert sum(1 for s, m in pf.results if s == "PASS" and m.startswith("db: ")) >= 20
+    # A settings change after the test makes it stale again.
+    with connect() as c, c.transaction():
+        int_config.save(c, "dob", "jira", "production", "live", True, {**_prod_settings()["jira"], "project": "SOC"},
+                        "test")
+    pf.results.clear()
+    pf.database(prod_db)
+    assert _fails(pf) == ["db: jira latest connection test passed for settings v2"]

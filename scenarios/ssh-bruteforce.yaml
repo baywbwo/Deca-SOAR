@@ -1,0 +1,14 @@
+# SSH brute force on an ECS host. No action maps to SAS alerts: the case and Jira issue are opened,
+# nothing is requested. Medium cases go to the Lark digest, which is not built yet (no message).
+version: 1
+id: ssh-bruteforce
+title: SSH brute force, case only
+alerts:
+  - {source: sas, rule_id: sas.bruteforce, severity_hint: medium, src_ip: "{ip}", dst_asset: ecs-web-02, events: 318}
+expect:
+  case: {category: Brute force SSH, tactics: [TA0006], techniques: [T1110.001], origin: true}
+  relations:
+    - [ip, targets, asset]
+  ai: {verdicts: [suspicious]}
+  requests: []
+  jira: {issues: 1}

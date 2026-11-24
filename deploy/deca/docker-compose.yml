@@ -24,6 +24,8 @@ x-common: &common
 
 x-env: &env
   HYPERSOAR_ENV: production
+  HYPERSOAR_MODE: production
+  HYPERSOAR_ENTITY: ${HYPERSOAR_ENTITY:-dob}
   HYPERSOAR_INTERNAL_CIDRS: ${HYPERSOAR_INTERNAL_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8,::1/128,fc00::/7,fe80::/10}
 
 x-temporal-env: &temporal-env
@@ -48,9 +50,11 @@ services:
       # Reviewed allowlist/catalog for this environment. The broker refuses HYPERSOAR_ENV=production while the
       # protected list still holds the repo's RFC5737 placeholders.
       HYPERSOAR_POLICY_DIR: /etc/deca-soar/policy
+      # Master key for Lark/Jira/9router secrets (AES-GCM at rest). Broker only.
+      HYPERSOAR_INTEGRATION_KEY_FILE: /run/secrets/deca_integration_key
     volumes:
       - ${HYPERSOAR_POLICY_HOST_DIR:?reviewed policy dir}:/etc/deca-soar/policy:ro
-    secrets: [deca_db_url_broker, deca_vault_private_key, broker_tls_cert, broker_tls_key]
+    secrets: [deca_db_url_broker, deca_vault_private_key, deca_integration_key, broker_tls_cert, broker_tls_key]
     ports:
       - "${HYPERSOAR_BIND_IP:?private VPC IP of this ECS}:8100:8100"
     healthcheck:
@@ -115,6 +119,7 @@ secrets:
   deca_tokenization_key: {file: /etc/deca-soar/secrets/deca_tokenization_key}
   deca_vault_public_key: {file: /etc/deca-soar/secrets/deca_vault_public_key}
   deca_vault_private_key: {file: /etc/deca-soar/secrets/deca_vault_private_key}
+  deca_integration_key: {file: /etc/deca-soar/secrets/deca_integration_key}
   deca_temporal_payload_key: {file: /etc/deca-soar/secrets/deca_temporal_payload_key}
   deca_broker_worker_token: {file: /etc/deca-soar/secrets/deca_broker_worker_token}
   broker_tls_cert: {file: /etc/deca-soar/tls/broker.pem}

@@ -6,6 +6,7 @@
   python scripts/preflight.py --env /etc/deca-soar/deca.env --temporal-env /etc/deca-soar/temporal/temporal.env \
       --secrets-dir /etc/deca-soar/secrets                      # plus the production files on the host
   python scripts/preflight.py --pki-root /etc/deca-soar [--operator-cert op.pem]  # N1 client-CA controls
+  python scripts/preflight.py --db-url-file /etc/deca-soar/secrets/deca_db_url_broker  # production DB gate
 Exit code 0 = pass, 1 = at least one FAIL.
 """
 
@@ -43,14 +44,16 @@ RETIRED_ENGINE = "trace" + "cat"  # the phase-0 engine this build replaced; must
 WRITE_CREDENTIALS = ("ALIBABA_CLOUD_ACCESS_KEY", "ALICLOUD_ACCESS_KEY", "ALICLOUD_SECRET_KEY", "HYPERSOAR_ACTOR_ROLE_ARN")
 # Which secrets each service may hold (least privilege, review F3/F5). The owner DSN is in none of them (N2).
 SECRET_ALLOWLIST = {
-    "broker": {"deca_db_url_broker", "deca_vault_private_key", "broker_tls_cert", "broker_tls_key"},
+    "broker": {"deca_db_url_broker", "deca_vault_private_key", "deca_integration_key", "broker_tls_cert",
+               "broker_tls_key"},
     "gateway": {"deca_db_url_gateway", "deca_tokenization_key", "deca_vault_public_key", "deca_temporal_payload_key",
                 "temporal_server_ca", "temporal_gateway_cert", "temporal_gateway_key"},
     "worker": {"deca_temporal_payload_key", "temporal_server_ca", "temporal_worker_cert", "temporal_worker_key",
                "deca_broker_worker_token", "broker_tls_ca"},
     "ledger-anchor": {"deca_db_url_auditor"},
 }
-KEY_FILES = ("deca_tokenization_key", "deca_vault_public_key", "deca_vault_private_key", "deca_temporal_payload_key")
+KEY_FILES = ("deca_tokenization_key", "deca_vault_public_key", "deca_vault_private_key", "deca_temporal_payload_key",
+             "deca_integration_key")
 RENDER_ENV = {
     "POSTGRES_SEEDS": "rds.internal", "POSTGRES_USER": "temporal", "POSTGRES_PWD": "preflight-dummy",
     "BIND_ON_IP": "10.0.0.5", "SQL_CA": "/ca.pem", "SQL_HOST_NAME": "rds.internal",
@@ -106,6 +109,7 @@ def static_deca_compose() -> None:
         check("no-new-privileges:true" in (s.get("security_opt") or []), f"deca compose: {name} no-new-privileges")
         env = s.get("environment") or {}
         check(env.get("HYPERSOAR_ENV") == "production", f"deca compose: {name} HYPERSOAR_ENV=production")
+        check(env.get("HYPERSOAR_MODE") == "production", f"deca compose: {name} HYPERSOAR_MODE=production")
         check(not any(k.startswith(WRITE_CREDENTIALS) for k in env), f"deca compose: {name} has no Alibaba write credential")
         check(not any(v for k, v in env.items() if not k.endswith("_FILE") and re.search(r"(KEY|TOKEN|PASSWORD|DB_URL)$", k)),
               f"deca compose: {name} passes secrets as files only")
@@ -127,6 +131,8 @@ def static_deca_compose() -> None:
         check(all(env.get(k) for k in ("HYPERSOAR_TEMPORAL_TLS_CA_FILE", "HYPERSOAR_TEMPORAL_TLS_CERT_FILE", "HYPERSOAR_TEMPORAL_TLS_KEY_FILE")),
               f"deca compose: {name} uses mTLS to Temporal")
         check(bool(env.get("HYPERSOAR_TEMPORAL_PAYLOAD_KEY_FILE")), f"deca compose: {name} encrypts Temporal payloads")
+    check(svcs["broker"]["environment"].get("HYPERSOAR_INTEGRATION_KEY_FILE") == "/run/secrets/deca_integration_key",
+          "deca compose: broker seals integration secrets with a mounted key")
 
 
 def static_owner_dsn(compose: Path = HYPERSOAR_COMPOSE, owner_compose: Path = OWNER_COMPOSE, runner: Path = OWNER_RUN) -> None:
@@ -479,6 +485,67 @@ def owner_leftovers(tmp: Path) -> None:
           + (f": {', '.join(left)}" if left else ""))
 
 
+INTEGRATIONS = ("lark", "jira", "ai")
+INTEGRATION_SECRETS = {"lark": ("app_secret", "verification_token", "encrypt_key"), "jira": ("api_token",),
+                       "ai": ("api_key",)}
+SETTINGS_PLACEHOLDERS = ("REPLACE", ".invalid", "sandbox")
+
+
+def database(url: str) -> None:
+    """Production gate on the database the services will use (broker DSN: it reads the integration
+    tables, never a secret value). Sandbox installs, synthetic data, mock targets, missing secrets and
+    settings without a passing connection test all FAIL."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    try:
+        conn = psycopg.connect(url, row_factory=dict_row, connect_timeout=10)
+    except psycopg.Error as e:
+        check(False, f"db: cannot connect ({type(e).__name__})")
+        return
+    with conn:
+        inst = conn.execute("SELECT mode, entity_id FROM public.hypersoar_install").fetchone()
+        check(inst is not None, "db: install marker present (hypersoar migrate ran)")
+        if inst is None:
+            return
+        eid = inst["entity_id"]
+        check(inst["mode"] == "production", f"db: install mode is production (found {inst['mode']})")
+        synthetic = conn.execute(
+            "SELECT (SELECT count(*) FROM gateway.alert_case WHERE synthetic)"
+            " + (SELECT count(*) FROM gateway.inbox_event WHERE alert->>'raw_ref' LIKE 'synthetic://%') AS n"
+        ).fetchone()["n"]
+        check(synthetic == 0, f"db: no synthetic cases or alerts ({synthetic} found)")
+        for name in INTEGRATIONS:
+            row = conn.execute(
+                "SELECT target, enabled, settings, version FROM broker.integration_config"
+                " WHERE entity_id = %s AND integration = %s AND mode = 'production'", (eid, name)).fetchone()
+            check(row is not None, f"db: {name} configured for production")
+            if row is None:
+                continue
+            check(row["enabled"], f"db: {name} enabled")
+            check(row["target"] == "live", f"db: {name} target is live (found {row['target']})")
+            text = str(row["settings"])
+            bad = [m for m in SETTINGS_PLACEHOLDERS if m in text]
+            check(not bad, f"db: {name} settings have no placeholder ({', '.join(bad) or 'none'})")
+            have = {r["name"]: r["expires_at"] for r in conn.execute(
+                "SELECT name, expires_at FROM broker.integration_secret WHERE entity_id = %s AND integration = %s"
+                " AND mode = 'production'", (eid, name))}
+            missing = [n for n in INTEGRATION_SECRETS[name] if n not in have]
+            check(not missing, f"db: {name} required secrets set" + (f" ({', '.join(missing)} missing)" if missing else ""))
+            expired = conn.execute(
+                "SELECT count(*) AS n FROM broker.integration_secret WHERE entity_id = %s AND integration = %s"
+                " AND mode = 'production' AND expires_at IS NOT NULL AND expires_at < now() + interval '7 days'",
+                (eid, name)).fetchone()["n"]
+            check(expired == 0, f"db: {name} no secret expires within 7 days")
+            last = conn.execute(
+                "SELECT status, config_version, target FROM broker.integration_test_run WHERE entity_id = %s"
+                " AND integration = %s AND mode = 'production' ORDER BY finished_at DESC LIMIT 1",
+                (eid, name)).fetchone()
+            tested = bool(last and last["status"] == "pass" and last["config_version"] == row["version"]
+                          and last["target"] == "live")
+            check(tested, f"db: {name} latest connection test passed for settings v{row['version']}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--temporal-bin", type=Path, help="directory with temporal-server and temporal-sql-tool")
@@ -487,10 +554,12 @@ def main() -> int:
     ap.add_argument("--secrets-dir", type=Path)
     ap.add_argument("--pki-root", type=Path, help="/etc/deca-soar: check the N1 client-CA controls")
     ap.add_argument("--operator-cert", type=Path, help="operator client certificate (public part) to include")
+    ap.add_argument("--db-url-file", type=Path,
+                    help="file holding the broker DSN: production gate on the database (implies --production)")
     ap.add_argument("--production", action="store_true",
                     help="production gate: placeholders FAIL instead of WARN (implied by --env/--secrets-dir)")
     a = ap.parse_args()
-    production = a.production or bool(a.env or a.secrets_dir)
+    production = a.production or bool(a.env or a.secrets_dir or a.db_url_file)
     static_repo()
     static_deca_compose()
     static_owner_dsn()
@@ -508,6 +577,8 @@ def main() -> int:
         secrets_dir(a.secrets_dir)
     if a.pki_root:
         pki(a.pki_root, a.operator_cert)
+    if a.db_url_file:
+        database(a.db_url_file.read_text().strip())
     owner_leftovers(Path(os.environ.get("HYPERSOAR_OWNER_TMPDIR", "/dev/shm")))
     for status, msg in results:
         if status != "PASS" or os.environ.get("PREFLIGHT_VERBOSE"):

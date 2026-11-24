@@ -169,6 +169,7 @@ def main() -> int:
         "deca_vault_private_key": vault.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
                                                       serialization.NoEncryption()).hex(),
         "deca_temporal_payload_key": secrets.token_hex(32),
+        "deca_integration_key": secrets.token_hex(32),
     }
     for name, value in keys.items():
         write(SEC / name, value + "\n", 0o400, APP_UID)

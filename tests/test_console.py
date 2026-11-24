@@ -3,6 +3,7 @@
 import ipaddress
 import json
 import random
+from datetime import UTC, datetime
 
 import psycopg
 import pytest
@@ -266,15 +267,42 @@ def test_state_shows_alert_verdict_and_shadow_decision(client, principals, pool,
 
 # Synthetic generator ------------------------------------------------------------------------------
 
-def test_synthetic_alerts_normalize_and_are_marked(tmp_path):
+def test_seeding_campaigns_normalize_into_mitre_chains(tmp_path):
     rng = random.Random(1)
     tok = Tokenizer(b"\x01" * 32)
-    for kind, _ in synth.MIX:
-        raw = synth.make_alert(kind, rng)
-        assert raw["raw_ref"] == "synthetic://lab"
-        assert ipaddress.ip_address(raw["src_ip"]) in ipaddress.ip_network(
-            "198.51.100.0/24" if kind == "waf_protected" else "203.0.113.0/24")
-        normalize(raw, tok, source_name="synthetic")
+    seed_net = ipaddress.ip_network("203.0.113.0/24")
+    for kind in synth.CAMPAIGNS:
+        c = synth.Campaign.start(kind, rng, 0)
+        tactics = []
+        while not c.done:
+            raw = c.next_alert(rng, datetime.now(UTC))
+            assert raw["raw_ref"] == "synthetic://lab"
+            ip = ipaddress.ip_address(raw["src_ip"])
+            if kind == "protected_source":
+                assert ip in ipaddress.ip_network("198.51.100.0/25")
+            else:  # never the 203.0.113.208/28+ blocks kept for scenario runs
+                assert ip in seed_net and int(str(ip).rsplit(".", 1)[1]) < 208
+            na = normalize(raw, tok, source_name="synthetic", keep_truth=True)
+            assert na.alert["synthetic_truth"] == synth.TRUTH.get(kind, "malicious")
+            tactics.append(na.alert["attack"]["tactic"])
+        if kind == "ak_lateral":
+            assert tactics == ["TA0001", "TA0007", "TA0008", "TA0009"]
+
+
+def test_seeding_bot_refuses_production(tmp_path):
+    with pytest.raises(RuntimeError, match="sandbox"):
+        synth.run(tmp_path / "a.ndjson", 0, 1, seed=1, mode="production")
+    assert not (tmp_path / "a.ndjson").exists()
+
+
+def test_seeding_bot_paces_the_l2_access_key_chain():
+    s = synth.Seeder(5, step_gap_s=120)
+    starts = []
+    t = 0.0
+    while t < 6 * 3600:
+        starts += [t for a in s.tick(t) if a["rule_id"] == "actiontrail.ak_unusual_ip"]
+        t += 120
+    assert len(starts) == 3 and all(b - a >= synth.AK_EVERY_S for a, b in zip(starts, starts[1:]))
 
 
 def test_synthetic_run_appends_whole_lines(tmp_path):
@@ -282,4 +310,6 @@ def test_synthetic_run_appends_whole_lines(tmp_path):
     n = synth.run(out, 0, 6, seed=3, log=lambda m: None)
     lines = out.read_text().splitlines()
     assert n == 6 and len(lines) == 6
-    assert {json.loads(x)["rule_id"] for x in lines[:4]} == {"waf.sqli.burst", "waf.scan.path_enum", "sas.bruteforce"}
+    # The first campaign is always the AccessKey chain, the second one of the weighted others.
+    assert json.loads(lines[0])["rule_id"] == "actiontrail.ak_unusual_ip"
+    assert {json.loads(x)["campaign"] for x in lines} >= {"ak_lateral"}

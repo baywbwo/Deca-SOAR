@@ -1,0 +1,14 @@
+# SQL injection from an address on the protected list (partner bank placeholder): the broker must
+# refuse to blacklist it whatever the verdict says.
+version: 1
+id: protected-source
+title: Attack from a protected range is never blocked
+alerts:
+  - {source: waf, rule_id: waf.sqli.burst, severity_hint: high, src_ip: "{pip}", dst_asset: api.qash, uri: /api/v1/snap/token, ua: sqlmap/1.8, events: 60}
+expect:
+  case: {category: SQL injection, tactics: [TA0001]}
+  ai: {verdicts: [malicious]}
+  requests:
+    - {action: waf.ip_blacklist.add, status: rejected, reason: target is protected}
+  lark: [lark.case_notify]
+  jira: {issues: 1}

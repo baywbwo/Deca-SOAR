@@ -1,0 +1,21 @@
+# Path enumeration (medium, suspicious) then a SQL injection burst (high, malicious) from one IP.
+# The blacklist is refused for the suspicious verdict and validated (shadow) for the malicious one.
+version: 1
+id: web-attack
+title: Path enumeration then SQL injection
+alerts:
+  - {source: waf, rule_id: waf.scan.path_enum, severity_hint: medium, src_ip: "{ip}", dst_asset: portal.dob, uri: /wp-admin/, ua: curl/8.5, events: 300}
+  - {source: waf, rule_id: waf.sqli.burst, severity_hint: high, src_ip: "{ip}", dst_asset: api.qash, uri: /api/v1/qris/inquiry, ua: sqlmap/1.8, events: 80}
+expect:
+  case:
+    category: Scanning and enumeration
+    tactics: [TA0043, TA0001]
+    techniques: [T1595.003, T1190]
+    origin: true
+  relations:
+    - [ip, targets, asset]
+  ai: {verdicts: [malicious, suspicious]}
+  requests:
+    - {action: waf.ip_blacklist.add, status: rejected, reason: verdict suspicious not allowed}
+    - {action: waf.ip_blacklist.add, status: validated, level: L1}
+  jira: {issues: 1}

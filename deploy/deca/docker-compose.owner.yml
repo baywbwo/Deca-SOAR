@@ -13,6 +13,9 @@ services:
     command: ["hypersoar", "migrate"]
     environment:
       HYPERSOAR_ENV: production
+      # migrate records the install marker: this database is for production mode and this entity.
+      HYPERSOAR_MODE: production
+      HYPERSOAR_ENTITY: ${HYPERSOAR_ENTITY:-dob}
       HYPERSOAR_DB_URL_FILE: /run/secrets/deca_db_url_owner
     secrets: [deca_db_url_owner]
     volumes:

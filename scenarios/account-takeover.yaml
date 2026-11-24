@@ -1,0 +1,24 @@
+# Credential stuffing on the merchant login, a login that works after the failures, then a
+# settlement export. WAF blacklist validated in shadow (L1); nothing runs.
+version: 1
+id: account-takeover
+title: Credential stuffing to settlement export
+alerts:
+  - {source: waf, rule_id: waf.bot.credential_stuffing, severity_hint: high, src_ip: "{ip}", dst_asset: merchant-login.qash, uri: /login, ua: python-requests/2.32, events: 412}
+  - {source: internal, rule_id: internal.portal.login_after_failures, severity_hint: high, src_ip: "{ip}", principal: "{user}", dst_asset: merchant-login.qash, events: 1}
+  - {source: internal, rule_id: internal.portal.settlement_export, severity_hint: high, src_ip: "{ip}", principal: "{user}", dst_asset: portal.dob, events: 1}
+expect:
+  case:
+    category: Credential stuffing
+    tactics: [TA0006, TA0001, TA0006]
+    techniques: [T1110.004, T1078, T1552.001]
+    origin: true
+  relations:
+    - [ip, targets, asset]
+    - [ip, authenticates_as, user]
+    - [user, targets, asset]
+  ai: {verdicts: [malicious]}
+  requests:
+    - {action: waf.ip_blacklist.add, status: validated, level: L1}
+  lark: [lark.case_notify]
+  jira: {issues: 1}

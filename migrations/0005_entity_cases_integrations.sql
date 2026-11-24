@@ -3,8 +3,8 @@
 -- approval escalation and scenario runs.
 --
 -- entity_id defaults to 'dob' (PT Delta Omega Beta), so existing rows belong to it. Scenario runs
--- use their own entity ids (scn-...), which keeps their cases, kill switch and rate limits apart
--- from the live sandbox feed.
+-- play inside the sandbox entity: they use addresses, AccessKeys and principals the seeding bot never
+-- uses (so they never join a live-feed case), and they obey its kill switch and rate limits.
 
 -- Install marker ---------------------------------------------------------------
 -- Written once by `hypersoar migrate` from HYPERSOAR_MODE / HYPERSOAR_ENTITY. Every service compares

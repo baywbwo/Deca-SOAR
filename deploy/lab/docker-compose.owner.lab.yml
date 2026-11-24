@@ -1,8 +1,13 @@
 # Lab only: lets the owner job of deploy/deca/docker-compose.owner.yml reach the lab's Postgres container
 # and verify its certificate. Used through deca-owner-run.sh with HYPERSOAR_OWNER_COMPOSE_OVERRIDE set to this
 # file; the owner DSN still only ever lives in the runner's tmpfs file (review N2).
+# The lab database is a sandbox install (synthetic data, mock Lark/Jira/9router), so the owner job migrates
+# it as one; a production database refuses to be opened in sandbox mode and the reverse.
 services:
   owner-job:
+    environment:
+      HYPERSOAR_ENV: lab
+      HYPERSOAR_MODE: sandbox
     secrets: [deca_db_ca]
     networks: [deca]
 

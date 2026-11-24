@@ -119,8 +119,9 @@ def cmd_console_hash(_: argparse.Namespace) -> int:
 
 def cmd_synth_alerts(a: argparse.Namespace) -> int:
     from hypersoar import synth
+    from hypersoar.common.entity import current_mode
 
-    synth.run(Path(a.out), a.interval, a.count, a.seed, log=lambda m: print(m, flush=True))
+    synth.run(Path(a.out), a.interval, a.count, a.seed, log=lambda m: print(m, flush=True), mode=current_mode())
     return 0
 
 
@@ -169,6 +170,50 @@ def cmd_integration_test(a: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_scenario_run(a: argparse.Namespace) -> int:
+    """Sandbox only: play scenarios/*.yaml against the running stack and record each result."""
+    from datetime import UTC, datetime
+
+    from hypersoar import scenarios as scn
+    from hypersoar import synth
+    from hypersoar.broker import catalog as catalog_mod
+    from hypersoar.broker.integrations.hub import Hub
+    from hypersoar.gateway import detections
+
+    mode, ent, box = _integration_ctx(need_box=False)
+    if mode != "sandbox":
+        raise ConfigError("scenario runs are sandbox only (HYPERSOAR_MODE=sandbox)")
+    catalog, _ = catalog_mod.load(Path(os.environ.get("HYPERSOAR_POLICY_DIR", "policy")))
+    rate_limits = {k: v.rate_per_hour for k, v in catalog.items() if v.rate_per_hour}
+    found = scn.load_dir(scn.scenarios_dir(), detections.load())
+    if a.only:
+        unknown = set(a.only) - set(found)
+        if unknown:
+            raise ConfigError(f"unknown scenario {sorted(unknown)}")
+    chosen = [s for sid, s in found.items() if not a.only or sid in a.only]
+    connect = lambda: psycopg.connect(_db_url(), row_factory=dict_row)  # noqa: E731
+    hub = Hub(entity=ent, mode=mode, box=box)
+    run_id = scn.new_run_id()
+    sha = os.environ.get("HYPERSOAR_GIT_SHA")
+    with connect() as conn:
+        slot = scn.next_slot(conn)
+    rc = 0
+    for i, s in enumerate(chosen):
+        started = datetime.now(UTC)
+        if s.kind == "connection_test":
+            r = scn.run_connection(lambda n: hub.test(connect, n, f"scenario:{a.actor}"), s)
+        else:
+            r = scn.run_pipeline(connect, ent.id, run_id, s, slot + i, lambda rows: synth.append(Path(a.replay), rows),
+                                 rate_limits=rate_limits, quota_wait_s=a.quota_wait,
+                                 log=lambda m: print(json.dumps({"wait": m}), file=sys.stderr, flush=True))
+        with connect() as conn, conn.transaction():
+            scn.record(conn, run_id, ent.id, r, s, started, sha)
+        print(json.dumps({"run_id": run_id, "scenario": r.scenario, "status": r.status, "duration_ms": r.duration_ms,
+                          "failures": r.failures, "note": r.note or None}), flush=True)
+        rc |= r.status != "pass"
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="hypersoar")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -192,9 +237,9 @@ def main(argv: list[str] | None = None) -> int:
     ks.set_defaults(fn=cmd_kill_switch)
     sub.add_parser("worker", help="run the Temporal alert worker").set_defaults(fn=cmd_worker)
     sub.add_parser("console-hash", help="hash a console password read from stdin").set_defaults(fn=cmd_console_hash)
-    sa = sub.add_parser("synth-alerts", help="lab only: append synthetic raw alerts to a replay file")
+    sa = sub.add_parser("synth-alerts", help="sandbox only: seeding bot, appends synthetic attack campaigns to a replay file")
     sa.add_argument("--out", required=True, help="replay NDJSON file read by the gateway")
-    sa.add_argument("--interval", type=float, default=90.0, help="seconds between alerts")
+    sa.add_argument("--interval", type=float, default=120.0, help="seconds between campaign steps")
     sa.add_argument("--count", type=int, default=0, help="stop after this many alerts (0 = run forever)")
     sa.add_argument("--seed", type=int, default=None)
     sa.set_defaults(fn=cmd_synth_alerts)
@@ -209,6 +254,15 @@ def main(argv: list[str] | None = None) -> int:
     it.add_argument("--integration", choices=("lark", "jira", "ai"))
     it.add_argument("--actor", required=True)
     it.set_defaults(fn=cmd_integration_test)
+    sc = sub.add_parser("scenario", help="sandbox only: end-to-end scenario runs (scenarios/*.yaml)")
+    scsub = sc.add_subparsers(dest="scmd", required=True)
+    sr = scsub.add_parser("run", help="play scenarios into the replay file; exit 1 unless every one passes")
+    sr.add_argument("--replay", required=True, help="replay NDJSON file read by the gateway")
+    sr.add_argument("--only", nargs="+", help="scenario ids (default: all)")
+    sr.add_argument("--quota-wait", type=float, default=2100.0,
+                    help="seconds to wait for a rate-limited action's hourly quota (default 35 min)")
+    sr.add_argument("--actor", default="operator", help="recorded with the connection tests")
+    sr.set_defaults(fn=cmd_scenario_run)
     a = ap.parse_args(argv)
     return a.fn(a)
 

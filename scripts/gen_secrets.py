@@ -31,6 +31,8 @@ def generate() -> dict[str, str]:
         "deca_vault_private_key": vault.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()).hex(),
         # Gateway + worker: Temporal payload codec (AES-256-GCM). The Temporal server never sees it.
         "deca_temporal_payload_key": secrets.token_hex(32),
+        # Broker only: seals Lark/Jira/9router secrets in the database (AES-256-GCM).
+        "deca_integration_key": secrets.token_hex(32),
     }
 
 
