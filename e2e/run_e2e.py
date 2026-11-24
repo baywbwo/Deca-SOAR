@@ -549,9 +549,13 @@ def setup_deca(st: Stack, pki: PKI, pg: dict) -> dict:
     }
 
 
-def guard_probes(st: Stack, denv: dict, summary: dict) -> None:
-    """Review N4/N7: services refuse a DSN with more privilege than they need; apps cannot pick ledger seq."""
+def guard_probes(st: Stack, pki: PKI, pg: dict, denv: dict, summary: dict) -> None:
+    """Review N4/N7/N8: services refuse a DSN with more privilege than they need; apps cannot pick ledger seq."""
     urls = denv["urls"]
+    # N8 PoC: the superuser, lowered to the broker login only through options=-c role=..., over TLS + scram.
+    switched = urls["owner"].parent / "deca_db_url_superuser_as_broker"
+    switched.write_text(db_url(st, pki, "postgres", pg["admin"]) + "&options=-c%20role%3Ddeca_brk\n")
+    switched.chmod(0o600)
     port = free_port()
 
     def serve(app: str, env: dict) -> subprocess.CompletedProcess:
@@ -571,6 +575,9 @@ def guard_probes(st: Stack, denv: dict, summary: dict) -> None:
         "gateway_with_broker_dsn": refused(serve("deca_soar.gateway.app:app",
                                                  {**denv["gateway"], "DECA_DB_URL_FILE": str(urls["broker"])})),
     }
+    r = serve("deca_soar.broker.app:app", {**denv["broker"], "DECA_DB_URL_FILE": str(switched)})
+    out["n8_broker_with_superuser_role_option"] = refused(r) and "session user postgres switched to deca_brk" in r.stderr
+    switched.unlink()
     anchors = st.run / "anchors-guard.ndjson"
     r = deca_cli(st, {**denv["auditor"], "DECA_DB_URL_FILE": str(urls["owner"])}, "anchor-ledger", "--sink",
                  f"file:{anchors}", ok=(2,))
@@ -642,7 +649,7 @@ def scenario(st: Stack, summary: dict) -> int:
     r = subprocess.run([str(DECA_PY), "-m", "deca_soar.cli", "worker"], capture_output=True, text=True, timeout=60,
                        env={**denv["worker"], "DECA_DB_URL_FILE": str(denv["urls"]["broker"])})
     summary["checks"]["worker_refuses_db_credentials"] = r.returncode != 0 and "must not hold" in r.stderr
-    guard_probes(st, denv, summary)
+    guard_probes(st, pki, pg, denv, summary)
 
     b_cert, b_key = denv["broker_tls"]
     st.start("deca-broker", [str(DECA_PY), "-m", "uvicorn", "deca_soar.broker.app:app", "--host", HOST,
