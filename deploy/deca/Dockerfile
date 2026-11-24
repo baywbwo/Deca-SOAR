@@ -1,10 +1,12 @@
 # DECA SOAR image for gateway, Temporal worker, broker and jobs (phase 0). Build from the repo root:
 #   docker build -f deploy/deca/Dockerfile \
 #     --build-arg BASE_IMAGE=python:3.12-slim-bookworm@sha256:<digest> -t deca-soar:<git-sha> .
-# The base image must be pinned by digest (review N3): the build stops if BASE_IMAGE still carries
-# the placeholder, and scripts/preflight.py --production fails on it too. Record the digest used as
-# DECA_BASE_IMAGE in /etc/deca-soar/deca.env (RUNBOOK section 5).
-ARG BASE_IMAGE=python:3.12-slim-bookworm@sha256:REPLACE_WITH_PINNED_DIGEST
+# The base image must be pinned by digest (review N3): the build stops if BASE_IMAGE is not
+# <image>@sha256:<64 hex>, and scripts/preflight.py --production fails on it too. The default below is
+# the linux/amd64 python:3.12-slim-bookworm index digest pulled for the lab build on 2026-11-24; bump it
+# deliberately (pull, scan, then edit). Record the digest used as DECA_BASE_IMAGE in
+# /etc/deca-soar/deca.env (RUNBOOK section 5).
+ARG BASE_IMAGE=python:3.12-slim-bookworm@sha256:82836454a795d9d75549a9e157fd08dbac6c383292cf89e99f4248a97ce6b2ff
 
 FROM ${BASE_IMAGE} AS build
 ARG BASE_IMAGE

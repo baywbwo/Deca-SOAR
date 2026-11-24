@@ -31,19 +31,33 @@ def _env(tmp_path: Path, text: str) -> Path:
 
 # N3: base image digest ----------------------------------------------------------------------------
 
-def test_n3_placeholder_digest_fails_in_production(pf):
-    pf.base_image(True, None)
+def _dockerfile(tmp_path: Path, value: str) -> Path:
+    p = tmp_path / "Dockerfile"
+    p.write_text(f"ARG BASE_IMAGE={value}\nFROM ${{BASE_IMAGE}}\n")
+    return p
+
+
+PLACEHOLDER = "python:3.12-slim-bookworm@sha256:REPLACE_WITH_PINNED_DIGEST"
+
+
+def test_n3_placeholder_digest_fails_in_production(pf, tmp_path):
+    pf.base_image(True, None, _dockerfile(tmp_path, PLACEHOLDER))
     assert _status(pf, "DECA_BASE_IMAGE pinned") == ["FAIL"]
 
 
-def test_n3_placeholder_digest_only_warns_outside_production(pf):
-    pf.base_image(False, None)
+def test_n3_placeholder_digest_only_warns_outside_production(pf, tmp_path):
+    pf.base_image(False, None, _dockerfile(tmp_path, PLACEHOLDER))
     assert _status(pf, "DECA_BASE_IMAGE pinned") == ["WARN"]
+
+
+def test_n3_repo_dockerfile_default_is_pinned(pf):
+    pf.base_image(True, None)
+    assert _status(pf, "DECA_BASE_IMAGE pinned") == ["PASS"]
 
 
 @pytest.mark.parametrize("value,expect", [
     (DIGEST, "PASS"),
-    ("python:3.12-slim-bookworm@sha256:REPLACE_WITH_PINNED_DIGEST", "FAIL"),
+    (PLACEHOLDER, "FAIL"),
     ("python:3.12-slim-bookworm", "FAIL"),
     ("python:3.12-slim-bookworm@sha256:" + "AB" * 32, "FAIL"),
     ("python:3.12-slim-bookworm@sha256:" + "ab" * 31, "FAIL"),
@@ -54,7 +68,7 @@ def test_n3_digest_from_production_env(pf, tmp_path, value, expect):
 
 
 def test_n3_production_flag_is_implied_by_env(pf, tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("sys.argv", ["preflight", "--env", str(_env(tmp_path, "DECA_BIND_IP=10.0.0.9\n"))])
+    monkeypatch.setattr("sys.argv", ["preflight", "--env", str(_env(tmp_path, f"DECA_BIND_IP=10.0.0.9\nDECA_BASE_IMAGE={PLACEHOLDER}\n"))])
     assert pf.main() == 1
     assert "FAIL  image: DECA_BASE_IMAGE pinned by sha256 digest" in capsys.readouterr().out
 
