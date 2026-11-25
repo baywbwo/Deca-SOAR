@@ -23,7 +23,8 @@ from hypersoar.sources import cef, connection_test, mapping, spool, webhook
 from hypersoar.sources.models import SlsSettings, SyslogSettings, WebhookSettings
 from hypersoar.sources.sls import SlsClient, SlsSource, signature
 
-from test_integrations import KEY_HEX, admin_hash, box, client, env, principals  # noqa: F401  (fixtures)
+from helpers import PW
+from test_integrations import KEY_HEX, _as, box, client, env, principals  # noqa: F401  (fixtures)
 
 SECRET = "w" * 40
 WEBHOOK = {"source_type": "siem", "rule_prefix": "wazuh.",
@@ -100,9 +101,11 @@ def _gateway_login(roles):
     return make_pool(roles["gateway"], max_size=2)
 
 
-def _configure(conn, box, name, settings, secrets=None, mode="sandbox", enabled=True):
+def _configure(conn, box, name, settings, secrets=None, mode="sandbox", enabled=True, activate=True):
     with conn.transaction():
-        int_config.save(conn, "dob", name, mode, "live", enabled, settings, "test")
+        v = int_config.save(conn, "dob", name, mode, "live", enabled, settings, "test")
+        if activate:  # as a passed connection test would
+            int_config.activate(conn, "dob", name, mode, v, "test")
         for k, v in (secrets or {}).items():
             secretbox.set_secret(conn, box, "dob", name, mode, k, v, "test")
 
@@ -223,13 +226,15 @@ def test_sls_connection_test_reports_errors_without_secrets():
     assert "sk-secret" not in json.dumps(steps)
 
 
-def test_source_connection_tests_through_the_broker(client, principals, conn, box):
+def test_source_connection_tests_through_the_broker(client, principals, conn, box, env):
     _configure(conn, box, "webhook", WEBHOOK, {"hmac_secret": SECRET})
     _configure(conn, box, "syslog", {"allowed_senders": ["10.0.0.0/8"]})
+    env.setenv("HYPERSOAR_INTEGRATION_WRITES", "1")
     for name in ("webhook", "syslog"):
-        r = client.post(f"/v1/integrations/{name}/test", headers=principals["admin1"])
+        r = client.post(f"/v1/integrations/{name}/test", headers=_as(principals, "admin1"), json={"password": PW})
         assert r.status_code == 200 and r.json()["status"] == "pass", r.text
-    assert client.post("/v1/integrations/sls/test", headers=principals["admin1"]).json()["status"] == "fail"
+    assert client.post("/v1/integrations/sls/test", headers=_as(principals, "admin1"),
+                       json={"password": PW}).json()["status"] == "fail"
     view = {i["integration"]: i for i in client.get("/v1/integrations", headers=principals["admin1"]).json()
             ["integrations"]}
     assert view["webhook"]["category"] == "source" and view["webhook"]["state"] == "connected"

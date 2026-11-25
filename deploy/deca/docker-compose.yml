@@ -51,8 +51,11 @@ services:
       # Reviewed allowlist/catalog for this environment. The broker refuses HYPERSOAR_ENV=production while the
       # protected list still holds the repo's RFC5737 placeholders.
       HYPERSOAR_POLICY_DIR: /etc/deca-soar/policy
-      # Master key for Lark/Jira/9router secrets (AES-GCM at rest). Broker only.
+      # Master key for integration secrets (AES-GCM at rest, HKDF subkeys per scope). Broker only.
       HYPERSOAR_INTEGRATION_KEY_FILE: /run/secrets/deca_integration_key
+      # Exact hostname(s) of the designated 9router; empty = live AI is refused. Lark, Jira and SLS hosts
+      # are fixed allowlists in the code (open.larksuite.com, *.atlassian.net, *.log.aliyuncs.com).
+      HYPERSOAR_AI_HOSTS: ${HYPERSOAR_AI_HOSTS:-}
     volumes:
       - ${HYPERSOAR_POLICY_HOST_DIR:?reviewed policy dir}:/etc/deca-soar/policy:ro
     secrets: [deca_db_url_broker, deca_vault_private_key, deca_integration_key, broker_tls_cert, broker_tls_key]
@@ -79,11 +82,13 @@ services:
       # replay file of synthetic alerts is a sandbox overlay (deploy/lab/docker-compose.sandbox.yml).
       HYPERSOAR_GATEWAY_SOURCE: connectors
       HYPERSOAR_PULL_INTERVAL_S: ${HYPERSOAR_PULL_INTERVAL_S:-15}
-      # Opens the sealed secrets of data sources (SLS AccessKey, webhook HMAC key). It only reads the
-      # source_config/source_secret views, never Lark/Jira/AI settings.
-      HYPERSOAR_INTEGRATION_KEY_FILE: /run/secrets/deca_integration_key
+      # The derived data-source key only (`hypersoar integration derive-source-key`): it opens the SLS
+      # AccessKey and webhook HMAC key, never a Lark/Jira/AI secret. The gateway refuses the master key.
+      HYPERSOAR_SOURCE_KEY_FILE: /run/secrets/deca_source_key
+      # Syslog/CEF (optional): HYPERSOAR_SYSLOG_PORT plus HYPERSOAR_SYSLOG_TLS_CERT_FILE/_KEY_FILE. Production
+      # accepts TCP with TLS only (UDP refused); senders outside allowed_senders are refused at connect.
     secrets: [deca_db_url_gateway, deca_tokenization_key, deca_vault_public_key, deca_temporal_payload_key,
-              deca_integration_key, temporal_server_ca, temporal_gateway_cert, temporal_gateway_key]
+              deca_source_key, temporal_server_ca, temporal_gateway_cert, temporal_gateway_key]
 
   worker:
     <<: *common
@@ -123,6 +128,7 @@ secrets:
   deca_vault_public_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_vault_public_key"}
   deca_vault_private_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_vault_private_key"}
   deca_integration_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_integration_key"}
+  deca_source_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_source_key"}
   deca_temporal_payload_key: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_temporal_payload_key"}
   deca_broker_worker_token: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/secrets/deca_broker_worker_token"}
   broker_tls_cert: {file: "${HYPERSOAR_ETC:-/etc/deca-soar}/tls/broker.pem"}

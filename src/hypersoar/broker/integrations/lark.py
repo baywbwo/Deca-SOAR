@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from hypersoar.broker.integrations.calls import IntegrationError
+from hypersoar.common import egress
 
 MAX_SKEW_S = 300
 SEV_TEMPLATE = {"critical": "red", "high": "orange", "medium": "yellow", "low": "grey"}
@@ -153,7 +154,7 @@ class LarkClient:
 
     def _http(self) -> httpx.Client:
         return httpx.Client(base_url=self.s.base_url, timeout=httpx.Timeout(10.0), follow_redirects=False,
-                            transport=self._transport)
+                            transport=self._transport or egress.transport("lark"))
 
     def _tenant_token(self, http: httpx.Client) -> str:
         if self._token and self._token[1] > time.monotonic():

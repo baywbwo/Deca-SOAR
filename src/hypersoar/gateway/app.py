@@ -9,6 +9,7 @@ gateway refuses to start with a replay file: synthetic alerts never reach a prod
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import threading
@@ -20,7 +21,7 @@ from fastapi.responses import JSONResponse
 
 from hypersoar.broker.integrations.secretbox import SecretBox
 from hypersoar.common import entity as entity_mod
-from hypersoar.common.config import ConfigError, Settings
+from hypersoar.common.config import DEFAULT_INTERNAL_CIDRS, ConfigError, Settings
 from hypersoar.common.db import make_pool
 from hypersoar.common.dbguard import assert_least_privilege_login
 from hypersoar.common.http import BodyLimit
@@ -75,6 +76,14 @@ def run_loop(stop: threading.Event, pool, settings: Settings, fixed: list, conne
         stop.wait(interval_s)
 
 
+def syslog_accept(connectors: Connectors):
+    """Checked when a connection or datagram arrives, from the last loaded settings (no DB call)."""
+    def accept(sender: str) -> bool:
+        a = connectors.peek("syslog")
+        return a is not None and syslog.allowed(sender, a.settings.allowed_senders)
+    return accept
+
+
 def syslog_handler(pool, entity_id: str, connectors: Connectors, counters: dict):
     def on_line(sender: str, line: str) -> None:
         a = connectors.get("syslog")
@@ -100,18 +109,20 @@ def syslog_handler(pool, entity_id: str, connectors: Connectors, counters: dict)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    mode = entity_mod.current_mode()  # first: nothing starts without an explicit mode
     settings = Settings.for_gateway()
-    mode = entity_mod.current_mode()
     fixed = [s for s in (replay_source(mode),) if s is not None]
     ent = entity_mod.load(mode=mode)
     pool = make_pool(settings.db_url)
     try:
         with pool.connection() as conn:
             assert_least_privilege_login(conn, "gateway")
+            entity_mod.assert_install(conn, mode, ent.id)
     except BaseException:
         pool.close()
         raise
-    connectors = Connectors(pool, ent.id, mode, SecretBox.from_env())
+    # The source subkey only: Lark/Jira/AI secrets are sealed under another key the gateway never holds.
+    connectors = Connectors(pool, ent.id, mode, SecretBox.source_from_env())
     starter = TemporalStarter(TemporalSettings.from_env(), identity=f"deca-gateway@{os.uname().nodename}")
     stop = threading.Event()
     t = threading.Thread(
@@ -124,13 +135,14 @@ async def lifespan(app: FastAPI):
     app.state.pool = pool
     app.state.entity_id = ent.id
     app.state.connectors = connectors
-    app.state.seen = webhook.SeenSignatures()
+    app.state.seen = webhook.DbSeen(pool, ent.id)
     app.state.syslog = {"accepted": 0, "dropped": 0, "unparsed": 0}
     listeners = []
-    if os.environ.get("HYPERSOAR_SYSLOG_PORT"):
-        listeners = await syslog.serve(os.environ.get("HYPERSOAR_SYSLOG_HOST", "0.0.0.0"),
-                                       int(os.environ["HYPERSOAR_SYSLOG_PORT"]),
-                                       syslog_handler(pool, ent.id, connectors, app.state.syslog))
+    listen = syslog.listen_config(mode)
+    if listen is not None:
+        await asyncio.to_thread(connectors.refresh, True)
+        listeners = await syslog.serve(listen, syslog_handler(pool, ent.id, connectors, app.state.syslog),
+                                       syslog_accept(connectors), app.state.syslog)
     yield
     for srv in listeners:
         srv.close()
@@ -150,8 +162,26 @@ def healthz() -> dict:
     return {"ok": True}
 
 
+PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-real-ip")
+
+
+def _internal_caller(request: Request) -> bool:
+    """A direct caller on an internal network: not a request relayed by the public proxy/SLB."""
+    if any(h in request.headers for h in PROXY_HEADERS):
+        return False
+    try:
+        ip = ipaddress.ip_address(request.client.host if request.client else "")
+    except ValueError:
+        return False
+    cidrs = os.environ.get("HYPERSOAR_INTERNAL_CIDRS", DEFAULT_INTERNAL_CIDRS)
+    return any(ip in ipaddress.ip_network(c.strip(), strict=False) for c in cidrs.split(",") if c.strip())
+
+
 @app.get("/readyz")
-def readyz() -> dict:
+def readyz(request: Request) -> dict:
+    # Inbox and syslog counters are for operators: not answered through the public webhook proxy.
+    if not _internal_caller(request):
+        raise HTTPException(404)
     with app.state.pool.connection() as conn:
         rows = conn.execute("SELECT status, count(*) AS n FROM gateway.inbox_event GROUP BY status").fetchall()
     return {"ok": True, "inbox": {r["status"]: r["n"] for r in rows}, "syslog": app.state.syslog}
@@ -168,8 +198,9 @@ async def ingest_webhook(request: Request):
     if len(body) > a.settings.max_body_kb * 1024:
         raise HTTPException(413, "request body too large")
     try:
-        webhook.verify(a.secrets.get("hmac_secret"), request.headers.get("x-hypersoar-timestamp"),
-                       request.headers.get("x-hypersoar-signature"), body, a.settings.max_skew_s, st.seen)
+        await asyncio.to_thread(
+            webhook.verify, a.secrets.get("hmac_secret"), request.headers.get("x-hypersoar-timestamp"),
+            request.headers.get("x-hypersoar-signature"), body, a.settings.max_skew_s, st.seen)
         recs = webhook.records(body)
     except webhook.Rejected as e:
         return JSONResponse({"detail": str(e)}, status_code=e.status)

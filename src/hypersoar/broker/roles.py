@@ -30,6 +30,9 @@ class Principal:
     name: str
     kind: str  # service | human
     role: str
+    # Where this credential is used: 'console' is the console's own principal token for one person,
+    # 'api' is any other caller. Only 'console' may approve L3 (service._decide).
+    channel: str = "api"
 
 
 def allowed(p: Principal, permission: str) -> bool:

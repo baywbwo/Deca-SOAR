@@ -161,7 +161,10 @@ def main() -> int:
     os.chmod(tdir, 0o500)
 
     # Application keys (same set as scripts/gen_secrets.py).
+    from hypersoar.broker.integrations.secretbox import derive
+
     vault = X25519PrivateKey.generate()
+    integration_master = secrets.token_hex(32)
     keys = {
         "deca_tokenization_key": secrets.token_hex(32),
         "deca_vault_public_key": vault.public_key().public_bytes(serialization.Encoding.Raw,
@@ -169,7 +172,8 @@ def main() -> int:
         "deca_vault_private_key": vault.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
                                                       serialization.NoEncryption()).hex(),
         "deca_temporal_payload_key": secrets.token_hex(32),
-        "deca_integration_key": secrets.token_hex(32),
+        "deca_integration_key": integration_master,
+        "deca_source_key": derive(bytes.fromhex(integration_master), "source").hex(),
     }
     for name, value in keys.items():
         write(SEC / name, value + "\n", 0o400, APP_UID)

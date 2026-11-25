@@ -67,19 +67,24 @@ IMPACT = {
 def principal_by_token(conn: psycopg.Connection, token: str) -> Principal | None:
     digest = hashlib.sha256(token.encode()).hexdigest()
     r = conn.execute(
-        "SELECT principal_id, name, kind, role FROM broker.principal WHERE token_sha256 = %s AND active",
+        "SELECT principal_id, name, kind, role, channel FROM broker.principal WHERE token_sha256 = %s AND active",
         (digest,),
     ).fetchone()
-    return Principal(str(r["principal_id"]), r["name"], r["kind"], r["role"]) if r else None
+    return Principal(str(r["principal_id"]), r["name"], r["kind"], r["role"], r["channel"]) if r else None
 
 
-def create_principal(conn: psycopg.Connection, name: str, kind: str, role: str, token: str, actor: str) -> str:
+def create_principal(conn: psycopg.Connection, name: str, kind: str, role: str, token: str, actor: str,
+                     channel: str = "api") -> str:
+    if channel == "console" and kind != "human":
+        raise ValueError("only a person's principal can be a console credential")
     pid = str(uuid.uuid4())
     conn.execute(
-        "INSERT INTO broker.principal (principal_id, name, kind, role, token_sha256) VALUES (%s, %s, %s, %s, %s)",
-        (pid, name, kind, role, hashlib.sha256(token.encode()).hexdigest()),
+        "INSERT INTO broker.principal (principal_id, name, kind, role, token_sha256, channel)"
+        " VALUES (%s, %s, %s, %s, %s, %s)",
+        (pid, name, kind, role, hashlib.sha256(token.encode()).hexdigest(), channel),
     )
-    ledger.append(conn, "principal.created", actor, {"principal_id": pid, "name": name, "kind": kind, "role": role})
+    ledger.append(conn, "principal.created", actor, {"principal_id": pid, "name": name, "kind": kind, "role": role,
+                                                     "channel": channel})
     return pid
 
 
@@ -166,6 +171,16 @@ def get_request(conn: psycopg.Connection, request_id: str) -> dict:
     return _request_view(r)
 
 
+def _syslog_only(conn: psycopg.Connection, b: Broker, alert: dict) -> bool:
+    """True when the alert, and every alert of its case, came in through the syslog connector."""
+    refs = [alert["raw_ref"]]
+    if alert["case_id"]:
+        refs = [r["raw_ref"] for r in conn.execute(
+            "SELECT e.alert->>'raw_ref' AS raw_ref FROM gateway.case_alert a JOIN gateway.inbox_event e"
+            " USING (alert_id) WHERE a.entity_id = %s AND a.case_id = %s", (b.entity_id, alert["case_id"]))]
+    return all(str(x or "").startswith("syslog://") for x in refs)
+
+
 def submit(conn: psycopg.Connection, b: Broker, who: Principal, body: dict) -> tuple[dict, bool]:
     """Validate and record one action request. Returns (view, replayed). Runs in the caller's transaction."""
     action = body["action"]
@@ -188,7 +203,8 @@ def submit(conn: psycopg.Connection, b: Broker, who: Principal, body: dict) -> t
         return _request_view(existing), True
 
     alert = conn.execute(
-        "SELECT e.alert_id, e.source, e.severity_hint, e.evidence_tokens, e.entity_id, a.case_id"
+        "SELECT e.alert_id, e.source, e.severity_hint, e.evidence_tokens, e.entity_id, a.case_id,"
+        " e.alert->>'raw_ref' AS raw_ref"
         " FROM gateway.inbox_event e LEFT JOIN gateway.case_alert a USING (alert_id) WHERE e.alert_id = %s",
         (alert_id,),
     ).fetchone()
@@ -228,6 +244,9 @@ def submit(conn: psycopg.Connection, b: Broker, who: Principal, body: dict) -> t
             ).fetchone()["n"]
             if n >= spec.rate_per_hour:
                 reasons.append(f"rate limit {spec.rate_per_hour}/hour reached")
+        if not reasons and target_mode == "auto" and who.kind != "human" and _syslog_only(conn, b, alert):
+            # Syslog has no sender authentication: it can open a case, never trigger an action by itself.
+            reasons.append("evidence is from syslog only; an automatic action needs an authenticated source")
         intent = policy.would_execute(spec, params) if not reasons else None
 
     killed = kill_switch_state(conn, action, b.entity_id)
@@ -370,10 +389,13 @@ def mark_expired(conn: psycopg.Connection, request_id: str, actor: str) -> bool:
 def decide_approval(conn: psycopg.Connection, who: Principal, request_id: str, approve: bool,
                     b: Broker | None = None, *, via: str = "api", reason: str | None = None) -> dict:
     """Record an approver decision. In shadow mode an approval still executes nothing."""
-    r = conn.execute(
-        "SELECT * FROM broker.action_request WHERE request_id = %s FOR UPDATE", (request_id,)
-    ).fetchone()
-    if r is None or (b is not None and r["entity_id"] != b.entity_id):
+    if b is not None:
+        r = conn.execute("SELECT * FROM broker.action_request WHERE request_id = %s AND entity_id = %s FOR UPDATE",
+                         (request_id, b.entity_id)).fetchone()
+    else:
+        r = conn.execute("SELECT * FROM broker.action_request WHERE request_id = %s FOR UPDATE",
+                         (request_id,)).fetchone()
+    if r is None:
         raise NotFound("request")
     if str(r["requested_by"]) == who.principal_id:
         raise PermissionError("requester cannot approve their own request")
@@ -396,9 +418,9 @@ def decide_from_lark(conn: psycopg.Connection, b: Broker, lark_user_id: str, req
     if step is None:
         raise PermissionError("not on the approver ladder")
     r = conn.execute(
-        "SELECT * FROM broker.action_request WHERE request_id = %s FOR UPDATE", (request_id,)
-    ).fetchone()
-    if r is None or r["entity_id"] != b.entity_id:
+        "SELECT * FROM broker.action_request WHERE request_id = %s AND entity_id = %s FOR UPDATE",
+        (request_id, b.entity_id)).fetchone()
+    if r is None:
         raise NotFound("request")
     return _decide(conn, b, r, approve, approver_id=None, approver_ref=f"lark:{lark_user_id[:80]}",
                    actor=f"lark:{lark_user_id[:80]}", via="lark", extra={"ladder_step": step,

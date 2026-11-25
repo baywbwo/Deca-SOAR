@@ -22,6 +22,7 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from hypersoar.common import egress
 from hypersoar.common.pii import TOKEN_RE
 
 SYSTEM_PROMPT = (
@@ -143,7 +144,7 @@ class NineRouter:
         if not self._key:
             raise RuntimeError("api key not set")
         with httpx.Client(base_url=self.s.base_url.rstrip("/") + "/", timeout=httpx.Timeout(float(self.s.timeout_s)),
-                          follow_redirects=False, transport=self._transport,
+                          follow_redirects=False, transport=self._transport or egress.transport("ai"),
                           headers={"Authorization": f"Bearer {self._key}"}) as http:
             r = http.post("chat/completions", json={
                 "model": model, "temperature": 0, "max_tokens": self.s.max_tokens,

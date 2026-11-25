@@ -12,6 +12,7 @@ import re
 import httpx
 
 from hypersoar.broker.integrations.calls import IntegrationError
+from hypersoar.common import egress
 
 LABEL_RE = re.compile(r"^hypersoar-[A-Za-z0-9-]{1,40}$")
 _RAW = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
@@ -88,7 +89,8 @@ class LiveJira:
         if not self._token:
             raise IntegrationError("jira api token not set")
         return httpx.Client(base_url=self.s.site, timeout=httpx.Timeout(15.0), follow_redirects=False,
-                            auth=(self.s.email, self._token), transport=self._transport,
+                            auth=(self.s.email, self._token),
+                            transport=self._transport or egress.transport("jira"),
                             headers={"Accept": "application/json"})
 
     def _call(self, method: str, path: str, what: str, **kw) -> httpx.Response:

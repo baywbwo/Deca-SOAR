@@ -14,6 +14,11 @@ services:
     environment: *production
   gateway:
     environment: *production
+  worker:
+    environment: *production
+  ledger-anchor:
+    environment: *production
   console:
     environment:
+      <<: *production
       HYPERSOAR_CONSOLE_SYNTHETIC: "0"

@@ -29,11 +29,12 @@ from hypersoar.broker.integrations import hub as hub_mod
 from hypersoar.broker.integrations import lark as lark_mod
 from hypersoar.broker.roles import Principal
 from hypersoar.common import entity as entity_mod
-from hypersoar.common.config import ConfigError, Settings, assert_no_write_credentials, read_secret
+from hypersoar.common.config import ConfigError, Settings, assert_no_write_credentials
 from hypersoar.common.db import make_pool
 from hypersoar.common.dbguard import assert_least_privilege_login
 from hypersoar.common.http import DEFAULT_MAX_BODY, BodyLimit
 from hypersoar.common.pii import Vault
+from hypersoar.console.auth import LoginLimiter
 
 log = logging.getLogger("hypersoar.broker")
 
@@ -165,6 +166,7 @@ async def lifespan(app: FastAPI):
     allow_test_nets = os.environ.get("HYPERSOAR_ALLOW_TEST_NETS") == "1"
     if production and allow_test_nets:
         raise ConfigError("HYPERSOAR_ALLOW_TEST_NETS is for tests only; refusing to start in production")
+    app.state.reauth_limit = reauth_limiter()
     app.state.broker = service.Broker(
         catalog=cat,
         protected=protected,
@@ -229,9 +231,13 @@ def healthz() -> dict:
 
 
 @app.get("/v1/whoami")
-def whoami(p: Annotated[Principal, Depends(current_principal)]) -> dict:
+def whoami(request: Request, p: Annotated[Principal, Depends(current_principal)]) -> dict:
+    """Also the install this broker serves, so a worker can refuse to run against the other mode."""
     perms = (roles.READ, roles.REQUEST_ACTION, roles.TRIAGE, roles.APPROVE, roles.KILL_SWITCH, roles.MANAGE)
-    return {"name": p.name, "kind": p.kind, "role": p.role, "permissions": [x for x in perms if roles.allowed(p, x)]}
+    b = request.app.state.broker
+    return {"name": p.name, "kind": p.kind, "role": p.role, "channel": p.channel,
+            "permissions": [x for x in perms if roles.allowed(p, x)],
+            "install": {"mode": b.hub.mode, "entity_id": b.entity_id}}
 
 
 @app.get("/v1/catalog")
@@ -285,17 +291,28 @@ def _idem_key(value: str | None) -> str | None:
     return value
 
 
+def reauth_limiter() -> LoginLimiter:
+    """Failed re-authentications per principal (5 per 15 minutes) on top of the console's own limit, so a
+    token used outside the console cannot guess a person's password either. One per broker process."""
+    return LoginLimiter(per_client=5, window_s=900, global_per_min=60)
+
+
 def human_write(request: Request, p: Principal, key: str | None, operation: str, body: dict, fn, *,
-                reauth: bool) -> dict:
+                reauth: bool, password: str | None = None) -> dict:
     """Run one human write in a transaction: re-auth (if asked), idempotent replay, the change, the
-    stored answer. Errors map to 403 (not allowed / re-auth), 404, 409 and 422."""
+    stored answer. Errors map to 403 (not allowed / re-auth), 404, 409, 422 and 429. `password`
+    overrides body["password"] when the body hashed for idempotency must not hold it."""
     key = _idem_key(key)
     sha = writes.body_sha(operation, body)
     pool = request.app.state.pool
+    limiter = request.app.state.reauth_limit
+    if reauth and not limiter.allow(p.principal_id):
+        raise HTTPException(429, "too many failed re-authentications; try again later",
+                            headers={"Retry-After": "900"})
     try:
         with pool.connection() as conn, conn.transaction():
             if reauth:
-                writes.check_reauth(conn, p, body.get("password"))
+                writes.check_reauth(conn, p, password if password is not None else body.get("password"))
             elif p.kind != "human":
                 raise PermissionError("only a person can make this change")
             if key and (prev := writes.replay(conn, p, key, operation, sha)) is not None:
@@ -303,6 +320,7 @@ def human_write(request: Request, p: Principal, key: str | None, operation: str,
             out = fn(conn)
             return writes.remember(conn, p, key, operation, sha, out) if key else {**out, "idempotent_replay": False}
     except writes.ReauthFailed as e:
+        limiter.failed(p.principal_id)
         with pool.connection() as conn, conn.transaction():
             ledger.append(conn, "auth.reauth_failed", f"principal:{p.name}", {"operation": operation},
                           request.app.state.broker.entity_id)
@@ -335,7 +353,7 @@ def post_approval(
     rid = str(request_id)
     return human_write(
         request, p, idempotency_key, "approval", {**body.model_dump(), "request_id": rid},
-        lambda conn: service.decide_approval(conn, p, rid, body.approve, b, via="console", reason=body.reason),
+        lambda conn: service.decide_approval(conn, p, rid, body.approve, b, via=p.channel, reason=body.reason),
         reauth=True)
 
 
@@ -482,8 +500,11 @@ async def jira_inbound(request: Request, x_hub_signature: Annotated[str | None, 
 
     def handle():
         with pool.connection() as conn:
-            secret = secretbox.get_secrets(conn, b.hub.box, b.entity_id, "jira", b.hub.mode).get("webhook_secret")
-            _, s = int_config.settings_of(conn, b.entity_id, "jira", b.hub.mode)
+            try:
+                _, s, secrets = b.hub._load(conn, "jira")
+            except (hub_mod.NotConfigured, int_config.ConfigInvalid):
+                s, secrets = None, {}
+            secret = secrets.get("webhook_secret")
         if not secret or not s or not s.sync.close_case_on_done:
             raise HTTPException(404, "not found")
         want = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
@@ -525,17 +546,19 @@ def _integration(name: str) -> str:
     return name
 
 
-def require_admin_reauth(request: Request, p: Principal, password: str) -> None:
-    """Writes need HYPERSOAR_INTEGRATION_WRITES=1 (off until screen 08 is approved and reviewed), a
-    human admin, and the admin password again."""
+def _integration_write(request: Request, p: Principal, key: str | None, operation: str, body: dict,
+                       password: str, fn) -> dict:
+    """Integration writes: HYPERSOAR_INTEGRATION_WRITES=1 (off until screen 08 is approved and reviewed),
+    a human admin (MANAGE), that person's password again, and an Idempotency-Key. The console reaches
+    these through its own CSRF-checked, same-origin proxy (console /api/integrations/...)."""
     if os.environ.get("HYPERSOAR_INTEGRATION_WRITES") != "1":
         raise HTTPException(403, "integration writes are disabled on this install")
-    if p.kind != "human" or p.role != "admin":
-        raise HTTPException(403, "only a human admin may change integrations")
-    from hypersoar.console.auth import PasswordHash
-    raw = read_secret("HYPERSOAR_INTEGRATION_ADMIN_PASSWORD_HASH", required=False)
-    if not raw or not PasswordHash.parse(raw).verify(password):
-        raise HTTPException(403, "re-authentication failed")
+    if not key:
+        raise HTTPException(422, "Idempotency-Key header is required")
+    try:
+        return human_write(request, p, key, operation, body, fn, reauth=True, password=password)
+    except int_config.ConfigInvalid as e:
+        raise HTTPException(422, str(e)) from None
 
 
 @app.get("/v1/integrations")
@@ -561,55 +584,56 @@ def integration_history(name: str, request: Request, _: Annotated[Principal, Dep
 
 @app.put("/v1/integrations/{name}")
 def put_integration(name: str, body: IntegrationConfigIn, request: Request,
-                    p: Annotated[Principal, Depends(require(roles.MANAGE))]) -> dict:
-    require_admin_reauth(request, p, body.password)
+                    p: Annotated[Principal, Depends(require(roles.MANAGE))],
+                    idempotency_key: Annotated[str | None, Header()] = None) -> dict:
     b = request.app.state.broker
-    try:
-        with request.app.state.pool.connection() as conn, conn.transaction():
-            v = int_config.save(conn, b.entity_id, _integration(name), b.hub.mode, body.target, body.enabled,
-                                body.settings, f"principal:{p.name}", body.note)
-    except int_config.ConfigInvalid as e:
-        raise HTTPException(422, str(e)) from None
-    return {"integration": name, "version": v}
+    name = _integration(name)
+    return _integration_write(
+        request, p, idempotency_key, f"integration.save:{name}", body.model_dump(), body.password,
+        lambda conn: {"integration": name, "version": int_config.save(
+            conn, b.entity_id, name, b.hub.mode, body.target, body.enabled, body.settings, f"principal:{p.name}",
+            body.note)})
 
 
 @app.post("/v1/integrations/{name}/rollback")
 def rollback_integration(name: str, body: RollbackIn, request: Request,
-                         p: Annotated[Principal, Depends(require(roles.MANAGE))]) -> dict:
-    require_admin_reauth(request, p, body.password)
+                         p: Annotated[Principal, Depends(require(roles.MANAGE))],
+                         idempotency_key: Annotated[str | None, Header()] = None) -> dict:
     b = request.app.state.broker
-    try:
-        with request.app.state.pool.connection() as conn, conn.transaction():
-            v = int_config.rollback(conn, b.entity_id, _integration(name), b.hub.mode, body.version,
-                                    f"principal:{p.name}")
-    except LookupError:
-        raise HTTPException(404, "version not found") from None
-    except int_config.ConfigInvalid as e:
-        raise HTTPException(422, str(e)) from None
-    return {"integration": name, "version": v}
+    name = _integration(name)
+    return _integration_write(
+        request, p, idempotency_key, f"integration.rollback:{name}", body.model_dump(), body.password,
+        lambda conn: {"integration": name, "version": int_config.rollback(
+            conn, b.entity_id, name, b.hub.mode, body.version, f"principal:{p.name}")})
 
 
-@app.put("/v1/integrations/{name}/secrets/{secret}", status_code=204)
+@app.put("/v1/integrations/{name}/secrets/{secret}")
 def put_secret(name: str, secret: str, body: SecretIn, request: Request,
-               p: Annotated[Principal, Depends(require(roles.MANAGE))]) -> Response:
-    require_admin_reauth(request, p, body.password)
+               p: Annotated[Principal, Depends(require(roles.MANAGE))],
+               idempotency_key: Annotated[str | None, Header()] = None) -> dict:
     b = request.app.state.broker
+    name = _integration(name)
     if b.hub.box is None:
         raise HTTPException(409, "integration master key not mounted")
     from datetime import date
     expires = date.fromisoformat(body.expires_at) if body.expires_at else None
-    try:
-        with request.app.state.pool.connection() as conn, conn.transaction():
-            secretbox.set_secret(conn, b.hub.box, b.entity_id, _integration(name), b.hub.mode, secret, body.value,
-                                 f"principal:{p.name}", expires)
-    except ValueError as e:
-        raise HTTPException(422, str(e)) from None
-    return Response(status_code=204)
+
+    def fn(conn):
+        secretbox.set_secret(conn, b.hub.box, b.entity_id, name, b.hub.mode, secret, body.value,
+                             f"principal:{p.name}", expires)
+        return {"integration": name, "secret": secret[:40], "set": True}
+    # The value is never part of the stored request hash: a retry is matched on name and expiry only.
+    return _integration_write(request, p, idempotency_key, f"integration.secret:{name}:{secret[:40]}",
+                              {"expires_at": body.expires_at}, body.password, fn)
 
 
 @app.post("/v1/integrations/{name}/test")
-def test_integration(name: str, request: Request, p: Annotated[Principal, Depends(require(roles.MANAGE))]) -> dict:
-    if p.kind != "human":
-        raise HTTPException(403, "only a human admin may run a connection test")
+def test_integration(name: str, body: Reauth, request: Request,
+                     p: Annotated[Principal, Depends(require(roles.MANAGE))],
+                     idempotency_key: Annotated[str | None, Header()] = None) -> dict:
+    """A passing test also activates the tested version, so it is a write like the others."""
     b = request.app.state.broker
-    return b.hub.test(request.app.state.pool.connection, _integration(name), f"principal:{p.name}")
+    name = _integration(name)
+    pool = request.app.state.pool
+    return _integration_write(request, p, idempotency_key, f"integration.test:{name}", {}, body.password,
+                              lambda conn: b.hub.test(pool.connection, name, f"principal:{p.name}"))

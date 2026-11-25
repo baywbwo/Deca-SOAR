@@ -109,7 +109,8 @@ services:
               "--no-proxy-headers", "--ssl-certfile", "/run/secrets/console_tls_cert",
               "--ssl-keyfile", "/run/secrets/console_tls_key"]
     environment:
-      HYPERSOAR_ENV: production
+      # HYPERSOAR_MODE comes from the sandbox or production overlay; the console refuses to start without it.
+      HYPERSOAR_ENV: lab
       HYPERSOAR_DB_URL_FILE: /run/secrets/deca_db_url_console
       HYPERSOAR_CONSOLE_PASSWORD_HASH_FILE: /run/secrets/console_password_hash
       HYPERSOAR_CONSOLE_USER: ${HYPERSOAR_CONSOLE_USER:-owner}

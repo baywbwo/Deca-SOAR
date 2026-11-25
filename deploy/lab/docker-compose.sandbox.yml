@@ -25,8 +25,15 @@ services:
     depends_on:
       synth: {condition: service_started}
 
+  # Every service states its mode; none inherits production from the base file.
+  worker:
+    environment: *sandbox
+  ledger-anchor:
+    environment: *sandbox
+
   console:
     environment:
+      <<: *sandbox
       HYPERSOAR_CONSOLE_SYNTHETIC: "1"
 
   synth:

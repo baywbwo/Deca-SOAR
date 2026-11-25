@@ -271,7 +271,7 @@ def _prod_settings():
     return {
         "lark": {"app_id": "cli_dobprod0001", "routing": {k: route for k in ("critical", "high", "medium", "low")},
                  "ladder": ladder},
-        "jira": {"site": "https://dob-test.example.net", "email": "soar-bot@dob.example", "project": "SEC",
+        "jira": {"site": "https://dob-test.atlassian.net", "email": "soar-bot@dob.example", "project": "SEC",
                  "issue_type": "Security Incident", "title_template": "[{severity}] {case_id} {case_title}",
                  "priority_map": {"critical": "Highest", "high": "High", "medium": "Medium", "low": "Low"},
                  "sync": {"comment_on_update": True, "done_on_close": True, "close_case_on_done": False}},
@@ -365,7 +365,8 @@ def test_db_gate_passes_on_empty_production_db_with_dummy_secrets(pf, prod_db, m
     from hypersoar.broker.integrations.hub import Hub
     from hypersoar.common import entity as entity_mod
     monkeypatch.setenv("HYPERSOAR_MODE", "production")
-    box = secretbox.SecretBox(b"\x11" * 32)
+    monkeypatch.setenv("HYPERSOAR_AI_HOSTS", "router.dob-test.example.net")
+    box = secretbox.SecretBox.from_master(b"\x11" * 32)
     connect = lambda: psycopg.connect(prod_db, row_factory=dict_row)  # noqa: E731
     with connect() as c, c.transaction():
         for name, s in _prod_settings().items():
@@ -377,7 +378,7 @@ def test_db_gate_passes_on_empty_production_db_with_dummy_secrets(pf, prod_db, m
               transports={n: httpx.MockTransport(_live_stub) for n in ("lark", "jira", "ai")})
     for name in ("lark", "jira", "ai"):
         r = hub.test(connect, name, "test")
-        assert r["status"] == "pass", r
+        assert r["status"] == "pass", r["steps"]
     pf.database(prod_db)
     assert _fails(pf) == []
     assert sum(1 for s, m in pf.results if s == "PASS" and m.startswith("db: ")) >= 20

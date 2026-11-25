@@ -52,8 +52,31 @@ class SeenSignatures:
             return True
 
 
+class DbSeen:
+    """Accepted signatures in gateway.webhook_seen: shared by every gateway process and kept across
+    restarts, so a captured request cannot be replayed after a restart or against another replica."""
+
+    def __init__(self, pool, entity_id: str) -> None:
+        self.pool, self.entity_id = pool, entity_id
+        self._n = 0
+
+    def first_time(self, sig: str, ttl_s: float) -> bool:
+        digest = hashlib.sha256(sig.encode()).hexdigest()
+        with self.pool.connection() as conn, conn.transaction():
+            self._n += 1
+            if self._n % 500 == 1:
+                conn.execute("DELETE FROM gateway.webhook_seen WHERE expires_at < now()")
+            row = conn.execute(
+                "INSERT INTO gateway.webhook_seen (entity_id, sig_sha256, expires_at)"
+                " VALUES (%s, %s, now() + make_interval(secs => %s))"
+                " ON CONFLICT (entity_id, sig_sha256) DO UPDATE SET expires_at = EXCLUDED.expires_at"
+                " WHERE gateway.webhook_seen.expires_at < now() RETURNING 1",
+                (self.entity_id, digest, float(ttl_s))).fetchone()
+        return row is not None
+
+
 def verify(secret: str | None, ts_header: str | None, sig_header: str | None, body: bytes, max_skew_s: int,
-           seen: SeenSignatures, now: float | None = None) -> None:
+           seen: SeenSignatures | DbSeen, now: float | None = None) -> None:
     if not secret or len(secret) < MIN_SECRET:
         raise Rejected(503, "webhook secret is not set")
     if not ts_header or not sig_header or not ts_header.isdigit():

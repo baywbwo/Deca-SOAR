@@ -17,6 +17,7 @@ import signal
 
 from temporalio.worker import Worker
 
+from hypersoar.common import entity as entity_mod
 from hypersoar.common.config import ConfigError, assert_no_write_credentials, read_secret
 from hypersoar.workflows.activities import BrokerSubmitter
 from hypersoar.workflows.config import TemporalSettings
@@ -45,10 +46,21 @@ def check_env() -> None:
         raise ConfigError("worker must not hold database or vault credentials (found: " + ", ".join(bad) + ")")
 
 
+async def check_install(broker: BrokerSubmitter, mode: str, entity_id: str) -> None:
+    """The worker has no database, so it checks the install through the broker it will post to."""
+    inst = await broker.install()
+    if inst.get("mode") != mode:
+        raise ConfigError(f"the broker serves a {inst.get('mode')} install; this worker runs in {mode} mode")
+    if inst.get("entity_id") != entity_id:
+        raise ConfigError("the broker serves another entity")
+
+
 async def run() -> None:
     check_env()
+    mode = entity_mod.current_mode()
     ts = TemporalSettings.from_env()
     broker = broker_from_env()
+    await check_install(broker, mode, entity_mod.load(mode=mode).id)
     client = await ts.connect(identity=f"deca-worker@{os.uname().nodename}")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

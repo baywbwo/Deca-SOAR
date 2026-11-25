@@ -20,7 +20,9 @@ from test_console import ORIGIN, PASSWORD, _login, console, console_env, pw_hash
 
 WRITES = [("/api/approvals/{request_id}/ask-ai", "POST"), ("/api/approvals/{request_id}/decision", "POST"),
           ("/api/cases/{case_id}/assign", "POST"), ("/api/cases/{case_id}/comments", "POST"),
-          ("/api/cases/{case_id}/status", "POST"), ("/api/kill-switch", "POST"),
+          ("/api/cases/{case_id}/status", "POST"), ("/api/integrations/{name}", "PUT"),
+          ("/api/integrations/{name}/rollback", "POST"), ("/api/integrations/{name}/secrets/{secret}", "PUT"),
+          ("/api/integrations/{name}/test", "POST"), ("/api/kill-switch", "POST"),
           ("/api/requests/{request_id}/revoke", "POST"), ("/login", "POST"), ("/logout", "POST")]
 
 
@@ -34,7 +36,7 @@ def owner(conn, pw_hash):
     """The broker's human principal the console user acts as: same name, admin, re-auth = console password."""
     tok = secrets.token_urlsafe(24)
     with conn.transaction():
-        service.create_principal(conn, "owner", "human", "admin", tok, "test")
+        service.create_principal(conn, "owner", "human", "admin", tok, "test", channel="console")
         bw.set_reauth_hash(conn, "owner", pw_hash, "test")
     return tok
 
@@ -296,3 +298,58 @@ def test_scenario_cli_refuses_production_before_touching_the_database(monkeypatc
         cli.main(["scenario", "run", "--replay", str(tmp_path / "x.ndjson"), "--actor", "t"])
     with pytest.raises(RuntimeError, match="HYPERSOAR_MODE=sandbox"):
         cli.main(["synth-alerts", "--out", str(tmp_path / "y.ndjson"), "--count", "1"])
+
+
+def _put(c, csrf, path, payload, **hdr):
+    h = {"content-type": "application/json", "x-hypersoar-csrf": csrf, "idempotency-key": secrets.token_hex(8),
+         **ORIGIN, **hdr}
+    return c.put(path, content=json.dumps(payload), headers=h)
+
+
+def test_integration_writes_go_through_the_console_with_csrf_and_reauth(wired, conn, monkeypatch):
+    c, csrf = wired
+    monkeypatch.setenv("HYPERSOAR_INTEGRATION_WRITES", "1")
+    url = "/api/integrations/lark/test"
+    assert _w(c, "wrong-csrf", url, {"password": PASSWORD}).status_code == 403
+    assert _w(c, csrf, url, {"password": PASSWORD}, origin="https://evil.example").status_code == 403
+    assert _w(c, csrf, url, {}).status_code == 422  # no password: refused before the broker
+    r = _w(c, csrf, url, {"password": "not the password"})
+    assert r.status_code == 403 and "re-authentication" in r.json()["detail"]
+    assert [x["actor"] for x in _ledger(conn, "auth.reauth_failed")] == ["principal:owner"]
+    ok = _w(c, csrf, url, {"password": PASSWORD})
+    assert ok.status_code == 200 and ok.json()["status"] == "pass", ok.text
+    assert _ledger(conn, "integration.tested")[-1]["actor"] == "principal:owner"
+    assert _put(c, "wrong-csrf", "/api/integrations/lark/secrets/app_secret",
+                {"value": "x" * 20, "password": PASSWORD}).status_code == 403
+    assert _put(c, csrf, "/api/integrations/lark/secrets/../../v1/kill-switch",
+                {"value": "x" * 20, "password": PASSWORD}).status_code in (404, 422)
+    monkeypatch.delenv("HYPERSOAR_INTEGRATION_WRITES")
+    assert _w(c, csrf, url, {"password": PASSWORD}).status_code == 403  # the broker's switch is off
+
+
+def test_ask_ai_is_rate_limited_per_user(wired, client, principals, pool, settings, tmp_path, conn):
+    c, csrf = wired
+    rid = _l2(client, principals, pool, settings, tmp_path, conn)
+    alert_id = str(conn.execute("SELECT alert_id FROM broker.action_request WHERE request_id = %s",
+                                (rid,)).fetchone()["alert_id"])
+    calls = []
+
+    def handler(req: httpx.Request):
+        calls.append(req.url.path)
+        return httpx.Response(200, json={"alert_id": alert_id, "verdict": "benign", "confidence": 0.5})
+
+    from hypersoar.console.app import UserRate, fastapi_app
+    real, real_rate = fastapi_app.state.broker, fastapi_app.state.ask_ai_rate
+    fastapi_app.state.broker = cw.BrokerClient("https://broker.test", "tok", transport=httpx.MockTransport(handler))
+    fastapi_app.state.ask_ai_rate = UserRate(2, 600)
+    try:
+        url = f"/api/approvals/{rid}/ask-ai"
+        assert _w(c, csrf, url, {}, key="ask-ai-r1").status_code == 200
+        assert _w(c, csrf, url, {}, key="ask-ai-r2").status_code == 200
+        r = _w(c, csrf, url, {}, key="ask-ai-r3")
+        assert r.status_code == 429 and "too often" in r.json()["detail"]
+        assert _w(c, csrf, url, {}, key="ask-ai-r1").json()["idempotent_replay"] is True  # a replay is free
+        assert len(calls) == 2
+    finally:
+        fastapi_app.state.broker.close()
+        fastapi_app.state.broker, fastapi_app.state.ask_ai_rate = real, real_rate

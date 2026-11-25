@@ -66,8 +66,13 @@ sudo install -d -m 0700 /etc/deca-soar/secrets
 sudo install -d -m 0755 /etc/deca-soar/tls /etc/deca-soar/temporal/tls
 sudo .venv/bin/python scripts/gen_secrets.py /etc/deca-soar/secrets
 #   -> deca_tokenization_key, deca_vault_public_key, deca_vault_private_key, deca_temporal_payload_key,
-#      deca_integration_key (0600, tidak menimpa)
+#      deca_integration_key, deca_source_key (0600, tidak menimpa)
+# Instalasi lama (sebelum v0.9) yang sudah punya deca_integration_key: turunkan key sumber data untuk gateway
+#   HYPERSOAR_INTEGRATION_KEY_FILE=/etc/deca-soar/secrets/deca_integration_key \
+#     hypersoar integration derive-source-key --out /etc/deca-soar/secrets/deca_source_key
 ```
+Gateway hanya memegang `deca_source_key` (subkey HKDF untuk secret SLS/webhook) dan menolak start bila diberi
+`HYPERSOAR_INTEGRATION_KEY(_FILE)`. Master `deca_integration_key` hanya di broker.
 File secret lain (isi dari vault ops / PKI):
 
 | File | Isi | Dipakai oleh |

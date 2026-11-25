@@ -2,11 +2,15 @@
 secretbox. entities/<id>.yaml seeds the first version; after that the database is the source.
 
 Every save writes a new version (the previous one stays for one-click rollback) and a ledger entry
-with the names of the fields that changed, never their values.
+with the names of the fields that changed, never their values. A live version only becomes the
+active one, the one the runtime uses, after its connection test passes (hub.test -> activate); a
+mock or disabled version is active at once. A live host must be on the integration's allowlist
+(common.egress), and saving another host deletes the secrets entered for the old one.
 """
 
 from __future__ import annotations
 
+import logging
 import string
 from typing import Literal
 
@@ -16,7 +20,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from hypersoar import ledger
 from hypersoar import sources
 from hypersoar.broker.integrations import CATEGORY, LABELS, NAMES, secretbox
+from hypersoar.common import egress
 
+log = logging.getLogger("hypersoar.broker.integrations")
 SEVERITIES = ("critical", "high", "medium", "low")
 TITLE_FIELDS = frozenset({"severity", "case_id", "case_title", "asset"})
 MAX_LADDER_MIN = 60
@@ -139,6 +145,12 @@ def validate(integration: str, mode: str, target: str, settings: dict):
             from None
     if integration == "ai" and mode == "production" and model.mock_fault != "none":
         raise ConfigInvalid("mock_fault is for sandbox only")
+    host = secretbox.bound_host(integration, model.model_dump(mode="json"))
+    if target == "live" and integration in (*egress.ALLOW, "ai"):
+        try:
+            egress.check_host(integration, host)
+        except egress.EgressDenied as e:
+            raise ConfigInvalid(str(e)) from None
     return model
 
 
@@ -158,27 +170,55 @@ def get(conn, entity_id: str, integration: str, mode: str) -> dict | None:
     ).fetchone()
 
 
-def settings_of(conn, entity_id: str, integration: str, mode: str):
-    """(row, validated settings model) or (None, None) when the integration is not configured."""
+def settings_of(conn, entity_id: str, integration: str, mode: str, *, latest: bool = False):
+    """(row, validated settings model) of the active version, or of the latest saved one with
+    latest=True (the connection test). The model is None when not configured, disabled or not yet
+    active. row["target"], ["enabled"], ["settings"] and ["version"] are those of that version."""
     row = get(conn, entity_id, integration, mode)
-    if row is None or not row["enabled"]:
+    if row is None:
+        return None, None
+    if not latest:
+        if row["active_version"] is None:
+            return row, None
+        if row["active_version"] != row["version"]:
+            v = conn.execute(
+                "SELECT target, enabled, settings, version FROM broker.integration_config_version"
+                " WHERE entity_id = %s AND integration = %s AND mode = %s AND version = %s",
+                (entity_id, integration, mode, row["active_version"])).fetchone()
+            row = {**row, **v}
+    if not row["enabled"]:
         return row, None
     return row, validate(integration, mode, row["target"], row["settings"])
 
 
+def activate(conn, entity_id: str, integration: str, mode: str, version: int, actor: str) -> bool:
+    """Make a tested version the one the runtime uses, unless a newer version was saved meanwhile."""
+    done = conn.execute(
+        "UPDATE broker.integration_config SET active_version = version WHERE entity_id = %s AND integration = %s"
+        " AND mode = %s AND version = %s AND active_version IS DISTINCT FROM version RETURNING version",
+        (entity_id, integration, mode, version)).fetchone()
+    if done:
+        ledger.append(conn, "integration.activated", actor[:120],
+                      {"integration": integration, "mode": mode, "version": version}, entity_id)
+    return done is not None
+
+
 def _write(conn, entity_id, integration, mode, target, enabled, settings, actor, note, previous):
     version = (previous["version"] + 1) if previous else 1
+    # Nothing is sent by a mock or disabled version, so it needs no connection test to take effect.
+    active = version if (target == "mock" or not enabled) else (previous["active_version"] if previous else None)
     if previous:
         conn.execute(
             "UPDATE broker.integration_config SET target = %s, enabled = %s, settings = %s, version = %s,"
-            " updated_by = %s, updated_at = now() WHERE entity_id = %s AND integration = %s AND mode = %s",
-            (target, enabled, Jsonb(settings), version, actor[:120], entity_id, integration, mode),
+            " active_version = %s, updated_by = %s, updated_at = now()"
+            " WHERE entity_id = %s AND integration = %s AND mode = %s",
+            (target, enabled, Jsonb(settings), version, active, actor[:120], entity_id, integration, mode),
         )
     else:
         conn.execute(
             "INSERT INTO broker.integration_config (entity_id, integration, mode, target, enabled, settings, version,"
-            " updated_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (entity_id, integration, mode, target, enabled, Jsonb(settings), version, actor[:120]),
+            " active_version, updated_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (entity_id, integration, mode, target, enabled, Jsonb(settings), version, active, actor[:120]),
         )
     conn.execute(
         "INSERT INTO broker.integration_config_version (entity_id, integration, mode, version, target, enabled,"
@@ -189,8 +229,10 @@ def _write(conn, entity_id, integration, mode, target, enabled, settings, actor,
                       if previous else {}, {"target": target, "enabled": enabled, **settings})
     ledger.append(conn, "integration.config_changed", actor[:120], {
         "integration": integration, "mode": mode, "version": version, "changed_fields": fields[:60],
-        "note": (note or "")[:200],
+        "note": (note or "")[:200], "active_version": active,
     }, entity_id)
+    secretbox.clear_other_hosts(conn, entity_id, integration, mode, secretbox.bound_host(integration, settings),
+                                actor, "host_changed")
     return version
 
 
@@ -217,11 +259,17 @@ def rollback(conn, entity_id: str, integration: str, mode: str, version: int, ac
 
 
 def seed(conn, entity, actor: str = "service:broker") -> list[str]:
-    """First start: copy entities/<id>.yaml settings into the database. Never overwrites."""
+    """First start: copy entities/<id>.yaml settings into the database. Never overwrites. Settings
+    that do not validate (a host not on the allowlist) are skipped and logged, never fatal."""
     seeded = []
     for name, raw in entity.integrations.items():
         if get(conn, entity.id, name, entity.mode) is None:
-            save(conn, entity.id, name, entity.mode, raw.target, True, raw.settings, actor, "seeded from entity file")
+            try:
+                save(conn, entity.id, name, entity.mode, raw.target, True, raw.settings, actor,
+                     "seeded from entity file")
+            except ConfigInvalid as e:
+                log.warning("integration %s not seeded: %s", name, e)
+                continue
             seeded.append(name)
     return seeded
 
@@ -247,7 +295,7 @@ def view(conn, entity_id: str, integration: str, mode: str) -> dict:
     elif not row["enabled"]:
         state = "disabled"
     elif t is None or t["config_version"] != row["version"]:
-        state = "not_tested"
+        state = "not_tested"  # a live version stays inactive until its test passes
     elif t["status"] != "pass":
         state = "error"
     elif errors or (row["target"] == "live" and not all(s["set"] for s in secrets.values() if s["required"])):
@@ -258,6 +306,7 @@ def view(conn, entity_id: str, integration: str, mode: str) -> dict:
         "integration": integration, "label": LABELS[integration], "category": CATEGORY[integration], "mode": mode,
         "target": row["target"] if row else None, "enabled": row["enabled"] if row else False,
         "version": row["version"] if row else 0, "settings": row["settings"] if row else None,
+        "active_version": row["active_version"] if row else None,
         "updated_by": row["updated_by"] if row else None,
         "updated_at": row["updated_at"].isoformat() if row else None,
         "secrets": secrets, "errors_24h": errors, "state": state,

@@ -15,7 +15,7 @@ from hypersoar.gateway import detections
 from hypersoar.workflows.shadow import build_request
 
 from helpers import ingest
-from test_integrations import admin_hash, client, env, principals  # noqa: F401  (fixtures)
+from test_integrations import client, env, principals  # noqa: F401  (fixtures)
 
 ROOT = Path(__file__).resolve().parents[1]
 ALL = scn.load_dir(ROOT / "scenarios", detections.load_dir(ROOT / "detections"))

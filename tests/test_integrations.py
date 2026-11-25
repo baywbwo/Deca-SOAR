@@ -18,31 +18,26 @@ from hypersoar.broker.integrations import hub as hub_mod
 from hypersoar.broker.integrations import lark, secretbox
 from hypersoar.common import entity as entity_mod
 from hypersoar.common.config import ConfigError
-from hypersoar.console.auth import hash_password
 
 from helpers import PW, ingest, set_reauth
 
 KEY_HEX = "11" * 32
-ADMIN_PW = "integration-admin-pw-for-tests"
+AI_HOST = "9router.sandbox.invalid"
 LARK = {"app_secret": "lark-app-secret-VALUE-9f3a", "verification_token": "lark-vtoken-VALUE-77c1",
         "encrypt_key": "lark-encrypt-VALUE-0b5e"}
 
 
-@pytest.fixture(scope="module")
-def admin_hash():
-    return hash_password(ADMIN_PW)
-
-
 @pytest.fixture
-def env(monkeypatch, settings, roles, admin_hash):
+def env(monkeypatch, settings, roles):
     monkeypatch.setenv("HYPERSOAR_DB_URL", roles["broker"])
     monkeypatch.setenv("HYPERSOAR_VAULT_PRIVATE_KEY", settings.vault_private_key.hex())
     monkeypatch.setenv("HYPERSOAR_ALLOW_TEST_NETS", "1")
     monkeypatch.setenv("HYPERSOAR_POLICY_DIR", str(settings.policy_dir))
     monkeypatch.setenv("HYPERSOAR_INTEGRATION_KEY", KEY_HEX)
-    monkeypatch.setenv("HYPERSOAR_INTEGRATION_ADMIN_PASSWORD_HASH", admin_hash)
     monkeypatch.setenv("HYPERSOAR_SYNC", "0")
-    for n in ("ALIBABA_CLOUD_ACCESS_KEY_ID", "HYPERSOAR_ENV", "HYPERSOAR_MODE", "HYPERSOAR_INTEGRATION_WRITES",
+    monkeypatch.setenv("HYPERSOAR_MODE", "sandbox")
+    monkeypatch.setenv("HYPERSOAR_AI_HOSTS", AI_HOST)
+    for n in ("ALIBABA_CLOUD_ACCESS_KEY_ID", "HYPERSOAR_ENV", "HYPERSOAR_INTEGRATION_WRITES",
               "HYPERSOAR_JIRA_INBOUND"):
         monkeypatch.delenv(n, raising=False)
     return monkeypatch
@@ -74,7 +69,19 @@ def client(env, principals):
 
 @pytest.fixture
 def box():
-    return secretbox.SecretBox(bytes.fromhex(KEY_HEX))
+    return secretbox.SecretBox.from_master(bytes.fromhex(KEY_HEX))
+
+
+def _host(conn, name):
+    return secretbox.bound_host(name, int_config.get(conn, "dob", name, "sandbox")["settings"])
+
+
+def _idem():
+    return {"Idempotency-Key": secrets.token_hex(8)}
+
+
+def _as(principals, who):
+    return {**principals[who], **_idem()}
 
 
 def _lark_secrets(conn, box):
@@ -130,15 +137,17 @@ def test_secret_is_write_only_and_never_logged(client, principals, conn, env, ca
     caplog.set_level(logging.DEBUG)
     url = "/v1/integrations/jira/secrets/api_token"
     value = "jira-token-VALUE-never-leaves-4d2c"
-    put = {"value": value, "password": ADMIN_PW}
-    assert client.put(url, headers=principals["admin1"], json=put).status_code == 403  # writes flag off
+    put = {"value": value, "password": PW}
+    assert client.put(url, headers=_as(principals, "admin1"), json=put).status_code == 403  # writes flag off
     env.setenv("HYPERSOAR_INTEGRATION_WRITES", "1")
-    assert client.put(url, headers=principals["approver1"], json=put).status_code == 403
-    assert client.put(url, headers=principals["svc-admin"], json=put).status_code == 403
-    r = client.put(url, headers=principals["admin1"], json={**put, "password": "wrong-password-here"})
+    assert client.put(url, headers=_as(principals, "approver1"), json=put).status_code == 403
+    assert client.put(url, headers=_as(principals, "svc-admin"), json=put).status_code == 403
+    assert client.put(url, headers=principals["admin1"], json=put).status_code == 422  # no Idempotency-Key
+    r = client.put(url, headers=_as(principals, "admin1"), json={**put, "password": "wrong-password-here"})
     assert r.status_code == 403 and "re-authentication" in r.text
-    assert client.put(url, headers=principals["admin1"], json=put).status_code == 204
-    assert client.put("/v1/integrations/jira/secrets/password", headers=principals["admin1"],
+    r = client.put(url, headers=_as(principals, "admin1"), json=put)
+    assert r.status_code == 200 and value not in r.text, r.text
+    assert client.put("/v1/integrations/jira/secrets/password", headers=_as(principals, "admin1"),
                       json=put).status_code == 422
     listing = client.get("/v1/integrations", headers=principals["approver1"])
     assert listing.status_code == 200 and value not in listing.text
@@ -148,14 +157,18 @@ def test_secret_is_write_only_and_never_logged(client, principals, conn, env, ca
     assert set(st) <= {"set", "rotated_at", "rotated_by", "expires_at", "required"}
     db = json.dumps([dict(r) for r in conn.execute("SELECT * FROM broker.integration_secret")], default=str)
     assert value not in db
+    wo = json.dumps([dict(r) for r in conn.execute("SELECT * FROM broker.write_op")], default=str)
+    assert value not in wo and PW not in wo
     led = json.dumps([r["canonical"] for r in conn.execute("SELECT canonical FROM ledger.entry")], default=str)
     assert value not in led and "api_token" in led
-    assert value not in caplog.text and ADMIN_PW not in caplog.text
+    assert value not in caplog.text and PW not in caplog.text
+    host = _host(conn, "jira")
     with conn.transaction():  # only the broker key opens it
-        assert secretbox.get_secrets(conn, secretbox.SecretBox(bytes.fromhex(KEY_HEX)), "dob", "jira",
-                                     "sandbox")["api_token"] == value
+        assert secretbox.get_secrets(conn, secretbox.SecretBox.from_master(bytes.fromhex(KEY_HEX)), "dob", "jira",
+                                     "sandbox", host)["api_token"] == value
         with pytest.raises(ConfigError):
-            secretbox.get_secrets(conn, secretbox.SecretBox(b"\x22" * 32), "dob", "jira", "sandbox")
+            secretbox.get_secrets(conn, secretbox.SecretBox.from_master(b"\x22" * 32), "dob", "jira", "sandbox",
+                                  host)
 
 
 def test_viewer_role_cannot_read_ciphertext(roles):
@@ -172,16 +185,16 @@ def test_config_save_history_and_rollback(client, principals, conn, env):
     ai_view = next(i for i in cur["integrations"] if i["integration"] == "ai")
     assert ai_view["version"] == 1 and ai_view["target"] == "mock"
     s = dict(ai_view["settings"], timeout_s=30)
-    r = client.put("/v1/integrations/ai", headers=principals["admin1"],
-                   json={"target": "mock", "settings": s, "password": ADMIN_PW, "note": "slower model"})
+    r = client.put("/v1/integrations/ai", headers=_as(principals, "admin1"),
+                   json={"target": "mock", "settings": s, "password": PW, "note": "slower model"})
     assert r.status_code == 200 and r.json()["version"] == 2, r.text
-    bad = client.put("/v1/integrations/ai", headers=principals["admin1"],
-                     json={"target": "mock", "settings": {**s, "api_key": "x"}, "password": ADMIN_PW})
+    bad = client.put("/v1/integrations/ai", headers=_as(principals, "admin1"),
+                     json={"target": "mock", "settings": {**s, "api_key": "x"}, "password": PW})
     assert bad.status_code == 422
     hist = client.get("/v1/integrations/ai/history", headers=principals["admin1"]).json()["versions"]
     assert [h["version"] for h in hist] == [2, 1]
-    rb = client.post("/v1/integrations/ai/rollback", headers=principals["admin1"],
-                     json={"version": 1, "password": ADMIN_PW})
+    rb = client.post("/v1/integrations/ai/rollback", headers=_as(principals, "admin1"),
+                     json={"version": 1, "password": PW})
     assert rb.status_code == 200 and rb.json()["version"] == 3
     assert int_config.get(conn, "dob", "ai", "sandbox")["settings"]["timeout_s"] == 20
     changed = _ledger(conn, "integration.config_changed")
@@ -331,8 +344,10 @@ def test_jira_mock_never_duplicates(client, principals, pool, settings, tmp_path
 def _live_jira(conn, monkeypatch_hub, transport):
     with conn.transaction():
         row = int_config.get(conn, "dob", "jira", "sandbox")
-        int_config.save(conn, "dob", "jira", "sandbox", "live", True, row["settings"], "test")
-        secretbox.set_secret(conn, secretbox.SecretBox(bytes.fromhex(KEY_HEX)), "dob", "jira", "sandbox",
+        v = int_config.save(conn, "dob", "jira", "sandbox", "live", True,
+                            {**row["settings"], "site": "https://deca-sandbox.atlassian.net"}, "test")
+        int_config.activate(conn, "dob", "jira", "sandbox", v, "test")  # as a passed connection test would
+        secretbox.set_secret(conn, secretbox.SecretBox.from_master(bytes.fromhex(KEY_HEX)), "dob", "jira", "sandbox",
                              "api_token", "jira-live-token-VALUE", "test")
     monkeypatch_hub.transports["jira"] = transport
 
@@ -422,7 +437,8 @@ def _set_ai(conn, **changes):
     with conn.transaction():
         row = int_config.get(conn, "dob", "ai", "sandbox")
         target = changes.pop("target", row["target"])
-        int_config.save(conn, "dob", "ai", "sandbox", target, True, {**row["settings"], **changes}, "test")
+        v = int_config.save(conn, "dob", "ai", "sandbox", target, True, {**row["settings"], **changes}, "test")
+        int_config.activate(conn, "dob", "ai", "sandbox", v, "test")  # as a passed connection test would
 
 
 def test_triage_mock_returns_verdict_and_trace(client, principals, pool, settings, tmp_path, conn):
@@ -465,7 +481,7 @@ def test_triage_live_bad_schema_and_token_limit(client, principals, pool, settin
 
     _set_ai(conn, target="live")
     with conn.transaction():
-        secretbox.set_secret(conn, secretbox.SecretBox(bytes.fromhex(KEY_HEX)), "dob", "ai", "sandbox", "api_key",
+        secretbox.set_secret(conn, secretbox.SecretBox.from_master(bytes.fromhex(KEY_HEX)), "dob", "ai", "sandbox", "api_key",
                              "router-key-VALUE", "test")
     client.broker.hub.transports["ai"] = httpx.MockTransport(handler)
     j = client.post("/v1/triage", headers=principals["worker-svc"], json={"alert_id": aid}).json()
@@ -488,13 +504,16 @@ def test_ai_refuses_untokenised_input():
 
 
 # -- connection tests -------------------------------------------------------------------
-def test_connection_test_per_integration(client, principals, conn):
+def test_connection_test_per_integration(client, principals, conn, env):
+    env.setenv("HYPERSOAR_INTEGRATION_WRITES", "1")
     for name in ("lark", "jira", "ai"):
-        r = client.post(f"/v1/integrations/{name}/test", headers=principals["admin1"])
+        r = client.post(f"/v1/integrations/{name}/test", headers=_as(principals, "admin1"), json={"password": PW})
         assert r.status_code == 200 and r.json()["status"] == "pass", r.text
         assert all(s["ok"] for s in r.json()["steps"])
-    assert client.post("/v1/integrations/ai/test", headers=principals["svc-admin"]).status_code == 403
-    assert client.post("/v1/integrations/nope/test", headers=principals["admin1"]).status_code == 404
+    assert client.post("/v1/integrations/ai/test", headers=_as(principals, "svc-admin"),
+                       json={"password": PW}).status_code == 403
+    assert client.post("/v1/integrations/nope/test", headers=_as(principals, "admin1"),
+                       json={"password": PW}).status_code == 404
     runs = conn.execute("SELECT integration, status FROM broker.integration_test_run ORDER BY started_at").fetchall()
     assert [(r["integration"], r["status"]) for r in runs] == [("lark", "pass"), ("jira", "pass"), ("ai", "pass")]
     view = client.get("/v1/integrations", headers=principals["admin1"]).json()
@@ -543,7 +562,7 @@ def test_cli_set_secret_reads_stdin_and_never_prints_it(client, conn, env, box, 
                      "--actor", "ops"]) == 0
     out = capsys.readouterr()
     assert value not in out.out + out.err and '"set": true' in out.out
-    assert secretbox.get_secrets(conn, box, "dob", "ai", "sandbox")["api_key"] == value
+    assert secretbox.get_secrets(conn, box, "dob", "ai", "sandbox", _host(conn, "ai"))["api_key"] == value
     assert value not in json.dumps(_ledger(conn, "integration.secret_rotated"))
     monkeypatch.setattr("sys.stdin", io.StringIO("\n"))
     assert cli.main(["integration", "set-secret", "--integration", "ai", "--name", "api_key", "--actor", "ops"]) == 2

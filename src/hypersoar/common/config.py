@@ -71,9 +71,10 @@ FORBIDDEN_WRITE_CREDENTIAL_ENV = (
 )
 
 
-# Old symmetric vault key (gateway could decrypt everything) and the broker's private key:
-# neither may ever be present in the gateway's environment (review F5).
-GATEWAY_FORBIDDEN_ENV = ("HYPERSOAR_VAULT_KEY", "HYPERSOAR_VAULT_PRIVATE_KEY")
+# Old symmetric vault key (gateway could decrypt everything), the broker's private key and the integration
+# master key (it derives the Lark/Jira/AI secret key too): none may be in the gateway's environment
+# (review F5, v0.8 finding 4). The gateway gets HYPERSOAR_SOURCE_KEY, the derived data-source subkey.
+GATEWAY_FORBIDDEN_ENV = ("HYPERSOAR_VAULT_KEY", "HYPERSOAR_VAULT_PRIVATE_KEY", "HYPERSOAR_INTEGRATION_KEY")
 
 
 def _present(name: str) -> bool:
@@ -106,7 +107,8 @@ class Settings:
         """Tokenisation key + vault public key only: the gateway can seal PII but never open it."""
         bad = [n for n in GATEWAY_FORBIDDEN_ENV if _present(n)]
         if bad:
-            raise ConfigError("gateway must not hold a vault decryption key (found: " + ", ".join(bad) + ")")
+            raise ConfigError("gateway must not hold a vault decryption key or the integration master key (found: "
+                              + ", ".join(bad) + ")")
         return cls(
             **cls._common(),
             tokenization_key=read_key32("HYPERSOAR_TOKENIZATION_KEY"),

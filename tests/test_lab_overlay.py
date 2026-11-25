@@ -102,7 +102,7 @@ def test_base_gateway_reads_configured_sources_only():
     gw = _base()["services"]["gateway"]
     assert gw["environment"]["HYPERSOAR_GATEWAY_SOURCE"] == "connectors"
     assert "HYPERSOAR_REPLAY_FILE" not in gw["environment"] and "volumes" not in gw
-    assert "deca_integration_key" in gw["secrets"]
+    assert "deca_source_key" in gw["secrets"] and "deca_integration_key" not in gw["secrets"]
 
 
 def test_sandbox_stack_has_the_dev_tools():
@@ -121,8 +121,8 @@ def test_sandbox_stack_has_the_dev_tools():
 def test_production_stack_has_no_synthetic_parts():
     doc = _lab("production")
     svcs = doc["services"]
-    assert set(svcs) == {"broker", "gateway", "console"}
-    for name in ("broker", "gateway"):
+    assert set(svcs) == {"broker", "gateway", "worker", "ledger-anchor", "console"}
+    for name in ("broker", "gateway", "worker", "ledger-anchor", "console"):
         env = svcs[name]["environment"]
         assert env["HYPERSOAR_MODE"] == "production", name
         assert not {"HYPERSOAR_ALLOW_TEST_NETS", "HYPERSOAR_INTEGRATION_WRITES", "HYPERSOAR_GATEWAY_SOURCE",
@@ -138,3 +138,18 @@ def test_scenario_runner_is_a_tool_with_the_broker_login_only():
     assert set(sc["secrets"]) == {"deca_db_url_broker", "deca_db_ca"}
     assert sc["environment"]["HYPERSOAR_DB_URL_FILE"] == "/run/secrets/deca_db_url_broker"
     assert sc["entrypoint"][:3] == ["hypersoar", "scenario", "run"]
+
+
+def test_every_service_states_its_mode_and_the_gateway_has_the_source_key_only():
+    base = _base()["services"]
+    gw = base["gateway"]
+    assert "deca_integration_key" not in gw["secrets"] and "deca_source_key" in gw["secrets"]
+    assert "HYPERSOAR_INTEGRATION_KEY_FILE" not in gw["environment"]
+    assert gw["environment"]["HYPERSOAR_SOURCE_KEY_FILE"] == "/run/secrets/deca_source_key"
+    assert "deca_integration_key" in base["broker"]["secrets"]
+    for overlay, mode in (("sandbox", "sandbox"), ("production", "production")):
+        svcs = _lab(overlay)["services"]
+        for name in ("broker", "gateway", "worker", "console", "ledger-anchor"):
+            assert svcs[name]["environment"]["HYPERSOAR_MODE"] == mode, (overlay, name)
+            assert svcs[name]["environment"]["HYPERSOAR_ENV"] == "lab", (overlay, name)
+    assert "HYPERSOAR_MODE" not in _lab()["services"]["console"]["environment"]

@@ -23,8 +23,11 @@ DEFAULT_ENTITY = "dob"
 
 
 def current_mode() -> str:
-    """HYPERSOAR_MODE, cross-checked with HYPERSOAR_ENV: a production deployment is always production mode."""
-    mode = os.environ.get("HYPERSOAR_MODE", "sandbox").strip()
+    """HYPERSOAR_MODE, cross-checked with HYPERSOAR_ENV: a production deployment is always production mode.
+    There is no default: a service whose mode was left out must not quietly run as sandbox."""
+    mode = os.environ.get("HYPERSOAR_MODE", "").strip()
+    if not mode:
+        raise ConfigError("HYPERSOAR_MODE is not set; set it to sandbox or production explicitly")
     if mode not in MODES:
         raise ConfigError("HYPERSOAR_MODE must be sandbox or production")
     if os.environ.get("HYPERSOAR_ENV") == "production" and mode != "production":

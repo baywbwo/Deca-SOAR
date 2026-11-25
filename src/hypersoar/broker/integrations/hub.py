@@ -20,6 +20,7 @@ from hypersoar import ledger, sources
 from hypersoar.broker.integrations import ai as ai_mod
 from hypersoar.broker.integrations import calls, config, jira as jira_mod, lark as lark_mod, secretbox
 from hypersoar.broker.integrations.calls import IntegrationError, Timer
+from hypersoar.common import egress
 from hypersoar.common.entity import Entity
 
 log = logging.getLogger("hypersoar.broker.integrations")
@@ -59,28 +60,34 @@ class Hub:
         return self.entity.id
 
     # -- clients -------------------------------------------------------------
-    def _load(self, conn, name: str):
-        row, model = config.settings_of(conn, self.entity_id, name, self.mode)
+    def _load(self, conn, name: str, latest: bool = False):
+        """latest=False: the active version (runtime); latest=True: the saved one (connection test).
+        Secrets are only those entered for that version's host."""
+        row, model = config.settings_of(conn, self.entity_id, name, self.mode, latest=latest)
         if model is None:
-            raise NotConfigured(f"{name} is not configured or disabled")
-        secrets = secretbox.get_secrets(conn, self.box, self.entity_id, name, self.mode)
+            raise NotConfigured(f"{name} is not configured, disabled or not yet activated by a passing test")
+        host = secretbox.bound_host(name, row["settings"])
+        secrets = secretbox.get_secrets(conn, self.box, self.entity_id, name, self.mode, host)
         return row, model, secrets
 
-    def lark(self, conn):
-        row, s, secrets = self._load(conn, "lark")
+    def lark(self, conn, latest: bool = False):
+        row, s, secrets = self._load(conn, "lark", latest)
         return lark_mod.LarkClient(s, secrets, row["target"], transport=self.transports.get("lark")), s, row
 
     def lark_secrets(self, conn) -> dict:
-        return secretbox.get_secrets(conn, self.box, self.entity_id, "lark", self.mode)
+        try:
+            return self._load(conn, "lark")[2]
+        except (NotConfigured, config.ConfigInvalid):
+            return {}
 
-    def jira(self, conn):
-        row, s, secrets = self._load(conn, "jira")
+    def jira(self, conn, latest: bool = False):
+        row, s, secrets = self._load(conn, "jira", latest)
         if row["target"] == "mock":
             return jira_mod.MockJira(conn, self.entity_id, s.project), s, row
         return jira_mod.LiveJira(s, secrets, transport=self.transports.get("jira")), s, row
 
-    def ai(self, conn):
-        row, s, secrets = self._load(conn, "ai")
+    def ai(self, conn, latest: bool = False):
+        row, s, secrets = self._load(conn, "ai", latest)
         return ai_mod.NineRouter(s, secrets, row["target"], transport=self.transports.get("ai")), s, row
 
     def ladder(self, conn):
@@ -98,10 +105,10 @@ class Hub:
             row = config.get(conn, self.entity_id, name, self.mode)
             try:
                 if name in sources.SPECS:
-                    _, s, secrets = self._load(conn, name)
+                    _, s, secrets = self._load(conn, name, latest=True)
                     client = _SourceProbe(name, s, secrets, self.transports.get(name))
                 else:
-                    client = {"lark": self.lark, "jira": self.jira, "ai": self.ai}[name](conn)[0]
+                    client = {"lark": self.lark, "jira": self.jira, "ai": self.ai}[name](conn, latest=True)[0]
                 load_error = None
             except (NotConfigured, config.ConfigInvalid) as e:
                 client, load_error = None, str(e)
@@ -113,7 +120,9 @@ class Hub:
                 if self.mode == "production" and row["target"] != "live":
                     steps = [{"step": "production uses a live target", "ok": False}]
                 else:
-                    steps = client.test()
+                    steps = _egress_step(name, row)
+                    if all(x["ok"] for x in steps):  # never send a secret to a refused host
+                        steps += client.test()
         status = "pass" if steps and all(s["ok"] for s in steps) else "fail"
         run_id = str(uuid.uuid4())
         with conn_factory() as conn, conn.transaction():
@@ -128,8 +137,22 @@ class Hub:
                 "config_version": row["version"] if row else 0,
                 "failed_steps": [s["step"] for s in steps if not s["ok"]],
             }, self.entity_id)
+            if status == "pass" and row is not None:
+                config.activate(conn, self.entity_id, name, self.mode, row["version"], actor)
         return {"run_id": run_id, "integration": name, "status": status, "steps": steps,
                 "config_version": row["version"] if row else 0}
+
+
+def _egress_step(name: str, row) -> list[dict]:
+    """A live host must resolve to public addresses only; the transport checks again at connect time."""
+    host = secretbox.bound_host(name, row["settings"])
+    if row["target"] != "live" or not host or name not in (*egress.ALLOW, "ai"):
+        return []
+    try:
+        egress.resolve(egress.check_host(name, host))
+        return [{"step": "host is allowed and public", "ok": True}]
+    except egress.EgressDenied as e:
+        return [{"step": "host is allowed and public", "ok": False, "detail": str(e)[:200]}]
 
 
 # -- outbox -------------------------------------------------------------------

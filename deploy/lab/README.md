@@ -91,6 +91,8 @@ and the `.125` addresses, and leave out `HYPERSOAR_REPLAY_DIR`.
      --name owner --kind human --role admin --token-file /out/console.token
    sudo mv /etc/deca-soar/out/console.token /etc/deca-soar/secrets/deca_broker_console_token
    (<owner DSN>; <console password>) | sudo ... deploy/deca/bin/deca-owner-run.sh set-reauth --name owner --actor ops
+   # L3 approvals only from the console's own token (v0.9):
+   <owner DSN> | sudo ... deploy/deca/bin/deca-owner-run.sh set-channel --name owner --channel console --actor ops
    sudo cat /etc/deca-soar/lab/db-logins.sql | $C exec -T -u postgres postgres psql -v ON_ERROR_STOP=1 -q
    sudo shred -u /etc/deca-soar/lab/db-bootstrap.sql /etc/deca-soar/lab/db-logins.sql
    ls /dev/shm   # no deca-owner.* left

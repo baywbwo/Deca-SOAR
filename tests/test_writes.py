@@ -45,7 +45,7 @@ def test_approval_without_reauth_is_rejected(client, principals, pool, settings,
     ok = client.post(url, headers=principals["approver1"], json={"approve": True, "password": PW})
     assert ok.status_code == 200 and ok.json()["status"] == "validated"
     entry = _ledger(conn, "action.approved")[-1]
-    assert entry["via"] == "console" and entry["approver"]
+    assert entry["via"] == "api" and entry["approver"]  # the channel comes from the principal, not the body
     assert PW not in str(conn.execute("SELECT json_agg(canonical) a FROM ledger.entry").fetchone())
 
 
@@ -61,7 +61,12 @@ def test_l3_has_no_fast_path(client, principals, pool, settings, tmp_path, conn)
     j = _l2(client, principals, pool, settings, tmp_path, conn)
     conn.execute("UPDATE broker.action_request SET level = 'L3' WHERE request_id = %s", (j["request_id"],))
     url = f"/v1/actions/requests/{j['request_id']}/approval"
-    # Re-authenticated but no reason: refused.
+    # An API-channel principal never approves L3, even re-authenticated and with a reason.
+    r = client.post(url, headers=principals["approver1"],
+                    json={"approve": True, "password": PW, "reason": "looks bad"})
+    assert r.status_code == 403 and "console" in r.text
+    conn.execute("UPDATE broker.principal SET channel = 'console' WHERE name = 'approver1'")
+    # Re-authenticated console principal but no reason: refused.
     r = client.post(url, headers=principals["approver1"], json={"approve": True, "password": PW})
     assert r.status_code == 403 and "reason" in r.text
     # Service principals never approve, whatever the level.

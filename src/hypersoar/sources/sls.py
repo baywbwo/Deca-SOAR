@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from hypersoar.common import egress
 from hypersoar.sources import mapping
 from hypersoar.sources.models import SlsSettings
 from hypersoar.sources.spool import map_record
@@ -45,7 +46,8 @@ class SlsClient:
         self.key_secret = secrets.get("access_key_secret")
         host = s.endpoint.removeprefix("https://")
         self.base = f"https://{s.project}.{host}"
-        self.http = httpx.Client(timeout=TIMEOUT_S, transport=transport, follow_redirects=False)
+        self.http = httpx.Client(timeout=TIMEOUT_S, transport=transport or egress.transport("sls"),
+                                 follow_redirects=False)
 
     def get_logs(self, frm: int, to: int, offset: int, line: int) -> tuple[list[dict], bool]:
         """(logs, complete). Raises SlsError with the HTTP status/SLS error code only."""

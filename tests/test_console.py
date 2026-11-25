@@ -267,11 +267,19 @@ def test_production_marks_pages_and_has_no_scenarios(console):
         console_env_install.get = real
 
 
-def test_entity_names_follow_the_install_mode_not_the_container_env(console_env):
-    # Lab containers carry HYPERSOAR_ENV=production and no HYPERSOAR_MODE; the console reads the entity file
-    # for the database's mode, so the header still says the company name instead of the bare id.
+def test_console_without_explicit_mode_refuses_to_start(console_env):
+    # Lab containers carry HYPERSOAR_ENV=production; without an explicit HYPERSOAR_MODE nothing guesses.
     console_env.setenv("HYPERSOAR_ENV", "production")
     console_env.delenv("HYPERSOAR_MODE", raising=False)
+    from hypersoar.console.app import app
+    with pytest.raises(ConfigError, match="HYPERSOAR_MODE"):
+        with TestClient(app, base_url="https://testserver"):
+            pass
+
+
+def test_entity_names_follow_the_install_mode_not_the_container_env(console_env):
+    console_env.setenv("HYPERSOAR_ENV", "lab")
+    console_env.setenv("HYPERSOAR_MODE", "sandbox")
     from hypersoar.console.app import app
     with TestClient(app, base_url="https://testserver") as c:
         assert "Security orchestration console · PT Delta Omega Beta" in c.get("/login").text

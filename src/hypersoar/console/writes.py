@@ -24,6 +24,8 @@ from hypersoar.common.config import ConfigError, read_secret
 CSRF_HEADER = "x-hypersoar-csrf"
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 CASE_ID = re.compile(r"^CS-[0-9]{1,9}$")
+INTEGRATION = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+SECRET_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 
 class BrokerClient:
@@ -47,10 +49,14 @@ class BrokerClient:
         self._client.close()
 
     def post(self, path: str, body: dict, key: str | None) -> tuple[int, dict]:
+        return self.send("POST", path, body, key)
+
+    def send(self, method: str, path: str, body: dict | None, key: str | None) -> tuple[int, dict]:
         """(status, JSON) as the browser should see it. The broker's 401 and 5xx become 502: they are this
         console's problem (token, broker down), not the person's session."""
         try:
-            r = self._client.post(path, json=body, headers={"Idempotency-Key": key} if key else {})
+            r = self._client.request(method, path, json=body,
+                                     headers={"Idempotency-Key": key} if key else {})
         except httpx.TransportError as e:
             return 502, {"detail": f"broker unreachable ({type(e).__name__})"}
         try:
@@ -104,11 +110,35 @@ class Empty(_In):
     pass
 
 
+class IntegrationSaveIn(_In):
+    password: str = Field(min_length=1, max_length=1024)
+    target: Literal["mock", "live"]
+    enabled: bool = True
+    settings: dict
+    note: str = Field(default="", max_length=200)
+
+
+class IntegrationRollbackIn(_In):
+    password: str = Field(min_length=1, max_length=1024)
+    version: int = Field(ge=1)
+
+
+class IntegrationSecretIn(_In):
+    password: str = Field(min_length=1, max_length=1024)
+    value: str = Field(min_length=1, max_length=4096)
+    expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class Reauth(_In):
+    password: str = Field(min_length=1, max_length=1024)
+
+
 @dataclass(frozen=True)
 class Plan:
     path: str
     body: dict
     reauth: bool
+    method: str = "POST"
 
 
 class BadInput(ValueError):
@@ -172,3 +202,31 @@ def ask_ai(conn, entity_id: str, request_id: str, data) -> Plan:
     if r is None:
         raise BadInput("not found")
     return Plan("/v1/triage", {"alert_id": str(r["alert_id"])}, False)
+
+
+# -- integration settings (backend only; the screen is not built yet). The broker keeps them off unless
+# HYPERSOAR_INTEGRATION_WRITES=1 and checks the person's password, the role and the Idempotency-Key.
+def _integration(name: str) -> str:
+    if not INTEGRATION.match(name):
+        raise BadInput("not found")
+    return name
+
+
+def integration_save(name: str, data) -> Plan:
+    return Plan(f"/v1/integrations/{_integration(name)}", parse(IntegrationSaveIn, data).model_dump(), True, "PUT")
+
+
+def integration_rollback(name: str, data) -> Plan:
+    return Plan(f"/v1/integrations/{_integration(name)}/rollback", parse(IntegrationRollbackIn, data).model_dump(),
+                True)
+
+
+def integration_secret(name: str, secret: str, data) -> Plan:
+    if not SECRET_NAME.match(secret):
+        raise BadInput("not found")
+    return Plan(f"/v1/integrations/{_integration(name)}/secrets/{secret}",
+                parse(IntegrationSecretIn, data).model_dump(exclude_none=True), True, "PUT")
+
+
+def integration_test(name: str, data) -> Plan:
+    return Plan(f"/v1/integrations/{_integration(name)}/test", parse(Reauth, data).model_dump(), True)

@@ -44,8 +44,46 @@ def cmd_create_principal(a: argparse.Namespace) -> int:
     with os.fdopen(fd, "w") as f:
         f.write(token + "\n")
     with psycopg.connect(_db_url(), row_factory=dict_row) as conn, conn.transaction():
-        pid = service.create_principal(conn, a.name, a.kind, a.role, token, "cli:operator")
-    print(json.dumps({"principal_id": pid, "name": a.name, "kind": a.kind, "role": a.role, "token_file": str(out)}))
+        pid = service.create_principal(conn, a.name, a.kind, a.role, token, "cli:operator", a.channel)
+    print(json.dumps({"principal_id": pid, "name": a.name, "kind": a.kind, "role": a.role, "channel": a.channel,
+                      "token_file": str(out)}))
+    return 0
+
+
+def cmd_set_channel(a: argparse.Namespace) -> int:
+    """Mark a principal's token as the console's own ('console', may approve L3) or any other caller ('api')."""
+    with psycopg.connect(_db_url(), row_factory=dict_row) as conn, conn.transaction():
+        r = conn.execute("SELECT kind FROM broker.principal WHERE name = %s AND active", (a.name,)).fetchone()
+        if r is None:
+            print("no active principal with that name", file=sys.stderr)
+            return 2
+        if a.channel == "console" and r["kind"] != "human":
+            print("only a person's principal can be a console credential", file=sys.stderr)
+            return 2
+        conn.execute("UPDATE broker.principal SET channel = %s WHERE name = %s AND active", (a.channel, a.name))
+        ledger.append(conn, "principal.channel_set", f"cli:{a.actor}", {"name": a.name, "channel": a.channel})
+    print(json.dumps({"name": a.name, "channel": a.channel}))
+    return 0
+
+
+def cmd_derive_source_key(a: argparse.Namespace) -> int:
+    """Write the gateway's data-source key, derived from HYPERSOAR_INTEGRATION_KEY(_FILE), to a new 0600 file.
+    The gateway gets only this file; the master key (which also derives the Lark/Jira/AI key) stays with the
+    broker."""
+    import base64
+
+    from hypersoar.broker.integrations import secretbox
+    from hypersoar.common.config import read_key32
+
+    out = Path(a.out)
+    if out.exists():
+        print("output file already exists; refusing to overwrite", file=sys.stderr)
+        return 2
+    key = secretbox.derive(read_key32("HYPERSOAR_INTEGRATION_KEY"), "source")
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(base64.urlsafe_b64encode(key).decode().rstrip("=") + "\n")
+    print(json.dumps({"written": str(out)}))
     return 0
 
 
@@ -251,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--kind", choices=("service", "human"), required=True)
     cp.add_argument("--role", choices=ROLES, required=True)
     cp.add_argument("--token-file", required=True, help="new 0600 file that receives the bearer token")
+    cp.add_argument("--channel", choices=("api", "console"), default="api",
+                    help="console = the console's own token for this person (needed to approve L3)")
     cp.set_defaults(fn=cmd_create_principal)
     vl = sub.add_parser("verify-ledger")
     vl.add_argument("--anchors", help="also compare with anchors from file:<path> or an off-host copy, sls-export:<path>")
@@ -268,6 +308,14 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("--name", required=True, help="human principal name")
     rs.add_argument("--actor", required=True, help="who is doing this (recorded in the ledger)")
     rs.set_defaults(fn=cmd_set_reauth)
+    sc_ = sub.add_parser("set-channel", help="set where a principal's token is used (api or console)")
+    sc_.add_argument("--name", required=True)
+    sc_.add_argument("--channel", choices=("api", "console"), required=True)
+    sc_.add_argument("--actor", required=True, help="who is doing this (recorded in the ledger)")
+    sc_.set_defaults(fn=cmd_set_channel)
+    dk = sub.add_parser("derive-source-key", help="write the gateway's data-source key derived from the master key")
+    dk.add_argument("--out", required=True, help="new 0600 file for HYPERSOAR_SOURCE_KEY_FILE")
+    dk.set_defaults(fn=cmd_derive_source_key)
     sub.add_parser("worker", help="run the Temporal alert worker").set_defaults(fn=cmd_worker)
     sub.add_parser("console-hash", help="hash a console password read from stdin").set_defaults(fn=cmd_console_hash)
     sa = sub.add_parser("synth-alerts", help="sandbox only: seeding bot, appends synthetic attack campaigns to a replay file")

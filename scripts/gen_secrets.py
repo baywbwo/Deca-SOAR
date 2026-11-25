@@ -22,7 +22,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def generate() -> dict[str, str]:
+    from hypersoar.broker.integrations.secretbox import derive
+
     vault = X25519PrivateKey.generate()
+    master = secrets.token_hex(32)
     return {
         # Gateway: HMAC tokenisation key + vault public key (seal only).
         "deca_tokenization_key": secrets.token_hex(32),
@@ -31,8 +34,10 @@ def generate() -> dict[str, str]:
         "deca_vault_private_key": vault.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()).hex(),
         # Gateway + worker: Temporal payload codec (AES-256-GCM). The Temporal server never sees it.
         "deca_temporal_payload_key": secrets.token_hex(32),
-        # Broker only: seals Lark/Jira/9router secrets in the database (AES-256-GCM).
-        "deca_integration_key": secrets.token_hex(32),
+        # Broker only: master of the integration secrets (HKDF subkeys per scope, AES-256-GCM).
+        "deca_integration_key": master,
+        # Gateway only: the data-source subkey of that master (opens SLS/webhook secrets, nothing else).
+        "deca_source_key": derive(bytes.fromhex(master), "source").hex(),
     }
 
 

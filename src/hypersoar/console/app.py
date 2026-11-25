@@ -21,6 +21,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -95,6 +96,8 @@ async def lifespan(app: FastAPI):
     # Wrong passwords on re-authenticated writes: 5 per 15 minutes per person and address.
     app.state.reauth_limiter = LoginLimiter(per_client=5, window_s=900, global_per_min=60)
     app.state.ask_ai = AskAiReplay()
+    # Ask AI spends model tokens: at most 10 runs per person per 10 minutes.
+    app.state.ask_ai_rate = UserRate(10, 600)
     app.state.ledger = queries.LedgerStatus()
     app.state.install = InstallInfo()
     app.state.entity = {}
@@ -103,8 +106,10 @@ async def lifespan(app: FastAPI):
     pool = ConnectionPool(db_url, min_size=1, max_size=4, configure=_configure,
                           kwargs={"row_factory": dict_row, "autocommit": False}, open=True)
     try:
+        mode = entity_mod.current_mode()
         with pool.connection() as conn:
             assert_least_privilege_login(conn, "console")
+            entity_mod.assert_install(conn, mode, entity_mod.load(mode=mode).id)
     except BaseException:
         pool.close()
         raise
@@ -120,6 +125,24 @@ async def lifespan(app: FastAPI):
     if app.state.broker is not None:
         app.state.broker.close()
     pool.close()
+
+
+class UserRate:
+    """At most `limit` calls per user in a sliding window."""
+
+    def __init__(self, limit: int, window_s: float) -> None:
+        self.limit, self.window_s, self._d, self._lock = limit, window_s, {}, threading.Lock()
+
+    def allow(self, user: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            q = self._d.setdefault(user, deque())
+            while q and now - q[0] > self.window_s:
+                q.popleft()
+            if len(q) >= self.limit:
+                return False
+            q.append(now)
+            return True
 
 
 class AskAiReplay:
@@ -466,7 +489,9 @@ async def _write(request: Request, plan):
     replay_key = (s.user, key) if p.path == "/v1/triage" else None
     if replay_key and (prev := st.ask_ai.get(replay_key)):
         return JSONResponse(prev[1], status_code=prev[0])
-    status, out = await run_in_threadpool(st.broker.post, p.path, p.body, key)
+    if replay_key and not st.ask_ai_rate.allow(s.user):
+        return _deny(429, "Ask AI was used too often; wait a few minutes")
+    status, out = await run_in_threadpool(st.broker.send, p.method, p.path, p.body, key)
     if p.reauth:
         if status == 403 and "re-authentication" in str(out.get("detail", "")):
             st.reauth_limiter.failed(bucket)
@@ -512,6 +537,26 @@ async def w_status(request: Request, case_id: str):
 @fastapi_app.post("/api/cases/{case_id}/comments")
 async def w_comment(request: Request, case_id: str):
     return await _write(request, lambda d, conn, inst: cw.comment(case_id, d))
+
+
+@fastapi_app.put("/api/integrations/{name}")
+async def w_integration_save(request: Request, name: str):
+    return await _write(request, lambda d, conn, inst: cw.integration_save(name, d))
+
+
+@fastapi_app.post("/api/integrations/{name}/rollback")
+async def w_integration_rollback(request: Request, name: str):
+    return await _write(request, lambda d, conn, inst: cw.integration_rollback(name, d))
+
+
+@fastapi_app.put("/api/integrations/{name}/secrets/{secret}")
+async def w_integration_secret(request: Request, name: str, secret: str):
+    return await _write(request, lambda d, conn, inst: cw.integration_secret(name, secret, d))
+
+
+@fastapi_app.post("/api/integrations/{name}/test")
+async def w_integration_test(request: Request, name: str):
+    return await _write(request, lambda d, conn, inst: cw.integration_test(name, d))
 
 
 app = BodyLimit(fastapi_app, MAX_BODY)

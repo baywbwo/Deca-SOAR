@@ -19,6 +19,31 @@ from hypersoar.common.db import make_pool, migrate
 from hypersoar.common.pii import vault_public_key
 
 ROOT = Path(__file__).resolve().parents[1]
+# Services refuse to start without an explicit HYPERSOAR_MODE; the suite runs as sandbox unless a test says so.
+os.environ.setdefault("HYPERSOAR_MODE", "sandbox")
+
+# Tests never resolve real names: every host is answered with one public address
+# (no connection is ever made to it; live clients get httpx MockTransports). A test that needs another
+# answer sets FAKE_DNS[host].
+FAKE_DNS: dict[str, list[str]] = {}
+PUBLIC_TEST_IP = "93.184.215.14"
+
+
+@pytest.fixture(autouse=True)
+def fake_dns(monkeypatch):
+    import socket
+
+    from hypersoar.common import egress
+
+    def resolve(host, port, *a, **kw):
+        ips = FAKE_DNS.get(host, [PUBLIC_TEST_IP])
+        if not ips:
+            raise socket.gaierror("no such name")
+        return [(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))
+                for ip in ips]
+    monkeypatch.setattr(egress, "_getaddrinfo", resolve)
+    yield FAKE_DNS
+    FAKE_DNS.clear()
 
 
 @pytest.fixture(scope="session")

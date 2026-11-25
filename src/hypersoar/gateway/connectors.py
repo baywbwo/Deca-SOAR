@@ -57,6 +57,7 @@ class Connectors:
                     try:
                         model = spec.model.model_validate(r["settings"])
                         secrets = secretbox.get_secrets(conn, self.box, self.entity_id, spec.name, self.mode,
+                                                        secretbox.bound_host(spec.name, r["settings"]),
                                                         table="broker.source_secret")
                     except Exception as e:  # invalid settings or a secret that does not open
                         log.error("source %s v%s skipped: %s", spec.name, r["version"], type(e).__name__)
@@ -68,6 +69,10 @@ class Connectors:
 
     def get(self, name: str) -> Active | None:
         return self.refresh().get(name)
+
+    def peek(self, name: str) -> Active | None:
+        """The last loaded settings without touching the database (safe on the event loop)."""
+        return self._active.get(name)
 
     def pull_sources(self) -> list:
         """AlertSources for the enabled connectors; an SLS client is rebuilt only when its version changes."""

@@ -56,6 +56,13 @@ class BrokerSubmitter:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def install(self) -> dict:
+        """Mode and entity of the install the broker serves (GET /v1/whoami)."""
+        resp = await self._client.get(self._url.rsplit("/v1/", 1)[0] + "/v1/whoami")
+        resp.raise_for_status()
+        inst = resp.json().get("install")
+        return inst if isinstance(inst, dict) else {}
+
     async def _post(self, url: str, body: dict) -> httpx.Response:
         try:
             resp = await self._client.post(url, json=body)
