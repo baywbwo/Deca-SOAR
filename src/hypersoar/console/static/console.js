@@ -26,7 +26,7 @@
   }
   function el(tag, attrs, ...kids) {
     const e = setAttrs(document.createElement(tag), attrs);
-    for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k instanceof Node ? k : String(k));
+    for (const k of kids.flat(Infinity)) if (k !== null && k !== undefined && k !== false) e.append(k instanceof Node ? k : String(k));
     return e;
   }
   function sv(tag, attrs, parent) {
@@ -36,7 +36,7 @@
   }
   function fill(target, ...kids) {
     const e = typeof target === "string" ? byId(target) : target;
-    if (e) e.replaceChildren(...kids.flat().filter(k => k !== null && k !== undefined && k !== false));
+    if (e) e.replaceChildren(...kids.flat(Infinity).filter(k => k !== null && k !== undefined && k !== false));
     return e;
   }
   function txt(id, t) { const e = byId(id); if (e) e.textContent = t; return e; }
@@ -1102,7 +1102,8 @@
     lag_s: "Lag (s)", page: "Page size", src_ip: "Source IP", ua: "User agent", uri: "URI", dst_asset: "Destination asset",
     access_key_id: "AccessKey ID", detected_at: "Detected at", rule_id: "Rule ID", events: "Event count" };
   const SECRET = { app_secret: "App secret", verification_token: "Verification token", encrypt_key: "Encrypt key", api_token: "API token",
-    webhook_secret: "Webhook secret", api_key: "API key" };
+    webhook_secret: "Webhook secret", api_key: "API key", hmac_secret: "HMAC secret", access_key_id: "AccessKey ID",
+    access_key_secret: "AccessKey secret" };
   const words = k => k.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
   const clone = v => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
@@ -1393,7 +1394,7 @@
         const types = SLS_TYPES.filter(k => presets()[k]);
         const cur = types.find(k => presets()[k].settings.source_type === s.source_type);
         fill(box, el("h3", { text: "Log type" }),
-          writable() ? el("div", { class: "seg wrap", role: "group", "aria-label": "Log type", id: "sls-types" },
+          writable() ? el("div", { class: "seg", role: "group", "aria-label": "Log type", id: "sls-types" },
             types.map(k => el("button", { type: "button", "data-preset": k, "aria-pressed": k === cur ? "true" : "false", text: presets()[k].label })))
             : el("p", { text: cur ? presets()[cur].label : s.source_type || "–" }),
           el("p", { class: "k", text: cur ? presets()[cur].blurb : "Pick the log type to start from its field mapping. The logstore name stays yours." }),

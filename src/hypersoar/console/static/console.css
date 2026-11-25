@@ -637,7 +637,7 @@ dialog.rw .h2 { font-size: 18px; line-height: 24px; font-weight: 600; margin: 0;
 .cat-list .nm { font-weight: 500; font-size: 13px; }
 .cat-list .d { grid-column: 2; color: var(--tx-3); font-size: 12px; line-height: 16px; }
 .cat-list .btn, .cat-list .tag { grid-column: 3; grid-row: 1 / span 2; }
-.seg.wrap { flex-wrap: wrap; }
+#sls-types { flex-wrap: wrap; justify-self: start; }
 .table-wrap table.map th, .table-wrap table.map td { padding: 6px 10px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--line); font-size: 13px; }
 .table-wrap table.map thead th { color: var(--tx-3); font-weight: 500; font-size: 12px; }
 .table-wrap table.map tbody th { font-weight: 400; color: var(--tx-2); white-space: nowrap; }
