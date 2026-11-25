@@ -636,6 +636,7 @@ dialog.rw .h2 { font-size: 18px; line-height: 24px; font-weight: 600; margin: 0;
 .ledger li.ver .btn { grid-column: 3; grid-row: 1 / span 2; align-self: center; }
 .ledger li.ver .tag { margin-left: 8px; }
 .savebar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 16px 20px; border: 1px solid var(--line); background: var(--s1); position: sticky; bottom: 0; }
+.locked[hidden], .savebar[hidden] { display: none; }
 .savebar .k { flex: 1 1 320px; }
 @media (max-width: 860px) { .ipanel .form, .arr-item.kvrow { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .tg input::after { transition: none; } }

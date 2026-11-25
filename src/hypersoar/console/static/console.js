@@ -1389,6 +1389,7 @@
       ro.textContent = !canWrite() ? "Writes are not configured on this console, so these settings are read-only."
         : "Settings are read-only here: the broker in this mode keeps the settings write API off. Change them on the host with hypersoar integration, then test.";
       byId("i-lock").hidden = !writable();
+      byId("s-bar").hidden = !writable();
       select(sel() || (item && item.integration), force);
     }
 
