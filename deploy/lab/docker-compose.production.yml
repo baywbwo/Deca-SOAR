@@ -1,8 +1,9 @@
 # Production stack of the lab (project deca-prod), on top of deploy/deca/docker-compose.yml and
 # deploy/lab/docker-compose.lab.yml. A production install from an empty database: no seeding bot, no
 # replay file, no scenario runner, no mock integrations (the broker refuses them), and the console has no
-# Scenario page. Alerts arrive only from data sources configured for production. The integration
-# settings API stays read-only until the security review (HYPERSOAR_INTEGRATION_WRITES unset).
+# Scenario page. Alerts arrive only from data sources configured for production. Integration settings
+# and secrets can be changed from the console (owner decision 2026-11-25): live targets only, hosts on
+# the allowlist, the person's password again, CSRF and an Idempotency-Key on every write.
 # HYPERSOAR_ENV stays `lab`: policy/protected.yaml still holds placeholders, and preflight --production is
 # the gate before a real production host.
 x-production: &production
@@ -11,7 +12,9 @@ x-production: &production
 
 services:
   broker:
-    environment: *production
+    environment:
+      <<: *production
+      HYPERSOAR_INTEGRATION_WRITES: "1"
   gateway:
     environment: *production
   worker:

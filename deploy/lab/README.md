@@ -12,8 +12,8 @@ console and tunnel URL:
 | Install mode | sandbox | production, from an empty database |
 | Alerts | seeding bot (`synth`) + configured data sources | configured data sources only |
 | Lark / Jira / 9router | mocks | live only (nothing configured yet) |
-| Scenario runner, Scenario page | yes | no (CLI refuses, page and API answer 404) |
-| Integration settings API | writes on | read-only until security review |
+| Scenario runner | CLI only (the console has no Scenario page) | no (CLI refuses; no Scenario page) |
+| Integration settings API | writes on (mock or live) | writes on, live targets only |
 
 | Production (phase 0) | Lab stand-in |
 |---|---|

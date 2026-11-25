@@ -1,5 +1,5 @@
 """The Integrations screen: the console reads settings, secret status, schemas and versions through the broker
-and writes them with CSRF + re-auth; a secret value never comes back. Production shows the screen read-only."""
+and writes them with CSRF + re-auth; a secret value never comes back. Production edits live settings only."""
 
 import json
 import secrets
@@ -186,24 +186,105 @@ def test_secrets_are_deleted_when_the_host_changes(wired, env):
     assert _ai(c)["secrets"]["api_key"]["set"] is False
 
 
-def test_production_refuses_every_integration_write(wired, env):
-    c, csrf = wired
+@pytest.fixture
+def production(wired, client):
+    """Console and broker both in production mode, as on the deca-prod stack."""
     from hypersoar.console.app import fastapi_app
     inst = fastapi_app.state.install
     real = inst.get
     inst.get = lambda pool: {**real(pool), "mode": "production"}
+    hub = client.broker.hub
+    hub.mode = "production"
     try:
-        ai = _ai(c)
-        for method, path, body in (
-                ("PUT", "/api/integrations/ai", {"target": "live", "enabled": True, "settings": ai["settings"]}),
-                ("PUT", "/api/integrations/ai/secrets/api_key", {"value": "k-" + "b" * 30}),
-                ("POST", "/api/integrations/ai/rollback", {"version": 1}),
-                ("POST", "/api/integrations/ai/test", {})):
-            r = _send(c, csrf, method, path, {**body, "password": PASSWORD})
-            assert r.status_code == 403 and "disabled" in r.json()["detail"], (path, r.text)
-        assert _ai(c)["version"] == ai["version"] and _ai(c)["secrets"]["api_key"]["set"] is False
+        yield wired
     finally:
         inst.get = real
+        hub.mode = "sandbox"
+
+
+def _item(c, name):
+    return next(i for i in c.get("/api/integrations").json()["integrations"] if i["integration"] == name)
+
+
+def test_production_without_the_write_flag_refuses_every_integration_write(production, env, conn):
+    c, csrf = production
+    ai = _ai(c)
+    live = int_config.get(conn, "dob", "ai", "sandbox")["settings"]
+    for method, path, body in (
+            ("PUT", "/api/integrations/ai", {"target": "live", "enabled": True, "settings": live}),
+            ("PUT", "/api/integrations/ai/secrets/api_key", {"value": "k-" + "b" * 30}),
+            ("POST", "/api/integrations/ai/rollback", {"version": 1}),
+            ("POST", "/api/integrations/ai/test", {})):
+        r = _send(c, csrf, method, path, {**body, "password": PASSWORD})
+        assert r.status_code == 403 and "disabled" in r.json()["detail"], (path, r.text)
+    assert _ai(c)["version"] == ai["version"] and _ai(c)["secrets"]["api_key"]["set"] is False
+
+
+JIRA = {"site": "https://deca-a.atlassian.net", "email": "soc@example.com", "project": "SOC", "issue_type": "Task",
+        "priority_map": {"critical": "Highest", "high": "High", "medium": "Medium", "low": "Low"}}
+
+
+def _ledger(conn, event_type):
+    return [r["canonical"] for r in conn.execute(
+        "SELECT canonical FROM ledger.entry WHERE event_type = %s ORDER BY seq", (event_type,))]
+
+
+def test_production_edits_live_settings_with_every_guard(production, env, conn):
+    """Owner decision 2026-11-25: production settings are edited from the console. Live targets only, hosts on
+    the allowlist, secrets bound to the host, the person's password, CSRF and an Idempotency-Key."""
+    c, csrf = production
+    env.setenv("HYPERSOAR_INTEGRATION_WRITES", "1")
+    j = c.get("/api/integrations").json()
+    assert j["mode"] == "production" and j["writes_enabled"] is True
+    put = lambda s, target="live", pw=PASSWORD: _send(  # noqa: E731
+        c, csrf, "PUT", "/api/integrations/jira", {"target": target, "enabled": True, "settings": s, "password": pw})
+
+    # Refused, and nothing saved: mock target, IP literal, internal and metadata addresses, hosts off the allowlist.
+    for s, target, why in (
+            (JIRA, "mock", "production cannot use a mock target"),
+            ({**JIRA, "site": "https://10.0.0.5"}, "live", "IP address"),
+            ({**JIRA, "site": "https://169.254.169.254"}, "live", "IP address"),
+            ({**JIRA, "site": "https://[::1]"}, "live", "site: String should match pattern"),
+            ({**JIRA, "site": "https://jira.internal.corp"}, "live", "allowlist"),
+            ({**JIRA, "site": "https://deca.atlassian.net.evil.example"}, "live", "allowlist")):
+        r = put(s, target)
+        assert r.status_code == 422 and why in r.json()["detail"], (s["site"], r.text)
+    assert not _item(c, "jira")["version"]
+    ai = int_config.get(conn, "dob", "ai", "sandbox")["settings"]
+    r = _send(c, csrf, "PUT", "/api/integrations/ai", {"target": "live", "enabled": True, "password": PASSWORD,
+                                                       "settings": {**ai, "mock_fault": "timeout"}})
+    assert r.status_code == 422 and "sandbox only" in r.json()["detail"], r.text
+
+    # Without CSRF, without the password, or with a wrong one: refused; a wrong password goes into the ledger.
+    h = {"content-type": "application/json", "idempotency-key": secrets.token_hex(8), **ORIGIN}
+    body = json.dumps({"target": "live", "enabled": True, "settings": JIRA, "password": PASSWORD})
+    assert c.put("/api/integrations/jira", content=body, headers=h).status_code == 403
+    r = _send(c, csrf, "PUT", "/api/integrations/jira", {"target": "live", "enabled": True, "settings": JIRA})
+    assert r.status_code in (403, 422), r.text
+    before = len(_ledger(conn, "auth.reauth_failed"))
+    assert put(JIRA, pw="not the password").status_code == 403
+    failed = _ledger(conn, "auth.reauth_failed")
+    assert len(failed) == before + 1 and "integration.save:jira" in json.dumps(failed[-1], default=str)
+    assert not _item(c, "jira")["version"]
+
+    # Saved on an allowed host; a secret is bound to it and goes when the host changes, by a save or a rollback.
+    assert put(JIRA).status_code == 200
+    v1 = _item(c, "jira")["version"]
+    token = lambda: _send(c, csrf, "PUT", "/api/integrations/jira/secrets/api_token",  # noqa: E731
+                          {"value": "qa-not-a-real-token-" + secrets.token_hex(8), "password": PASSWORD})
+    assert token().status_code == 200 and _item(c, "jira")["secrets"]["api_token"]["set"] is True
+    assert put({**JIRA, "site": "https://deca-b.atlassian.net"}).status_code == 200
+    jira = _item(c, "jira")
+    assert jira["version"] == v1 + 1 and jira["secrets"]["api_token"]["set"] is False
+    assert token().status_code == 200
+    rb = _send(c, csrf, "POST", "/api/integrations/jira/rollback", {"version": v1, "password": PASSWORD})
+    assert rb.status_code == 200, rb.text
+    jira = _item(c, "jira")
+    assert jira["settings"]["site"] == JIRA["site"] and jira["secrets"]["api_token"]["set"] is False
+    cleared = _ledger(conn, "integration.secrets_cleared")
+    assert len(cleared) >= 2 and all("api_token" in json.dumps(x, default=str) for x in cleared[-2:])
+    # A live version is not active before its connection test passes: nothing is sent to Jira yet.
+    assert jira["active_version"] is None
 
 
 def test_listing_carries_allowlist_presets_and_source_health(wired, env):

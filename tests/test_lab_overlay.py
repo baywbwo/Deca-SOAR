@@ -125,8 +125,10 @@ def test_production_stack_has_no_synthetic_parts():
     for name in ("broker", "gateway", "worker", "ledger-anchor", "console"):
         env = svcs[name]["environment"]
         assert env["HYPERSOAR_MODE"] == "production", name
-        assert not {"HYPERSOAR_ALLOW_TEST_NETS", "HYPERSOAR_INTEGRATION_WRITES", "HYPERSOAR_GATEWAY_SOURCE",
-                    "HYPERSOAR_REPLAY_FILE"} & set(env), name
+        assert not {"HYPERSOAR_ALLOW_TEST_NETS", "HYPERSOAR_GATEWAY_SOURCE", "HYPERSOAR_REPLAY_FILE"} & set(env), name
+        # Only the broker takes integration settings writes (owner decision 2026-11-25).
+        assert ("HYPERSOAR_INTEGRATION_WRITES" in env) == (name == "broker"), name
+    assert svcs["broker"]["environment"]["HYPERSOAR_INTEGRATION_WRITES"] == "1"
     text = (LAB / "docker-compose.production.yml").read_text()
     assert "synth" not in text.replace("synthetic", "") and "replay:" not in text
 

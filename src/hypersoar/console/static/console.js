@@ -1364,6 +1364,8 @@
         el("legend", { class: "vh", text: `${item.label} settings` }),
         el("label", { class: "tg", for: "f-enabled" }, enabled, el("span", { text: "Enabled. Off keeps the settings but nothing is sent or received." })),
         el("div", { class: "form" }, Object.keys(props).map(k => {
+          // The broker refuses a mock fault outside the sandbox, so production never offers it.
+          if (k === "mock_fault" && data.mode === "production") return null;
           if (isSource() && k === "fields") return mapTable(s.fields || (s.fields = {}), true);
           if (item.integration === "sls" && k === "endpoint") return region(s, k);
           return node(s, k, props[k], FIELD[k] || words(k));
@@ -1546,9 +1548,7 @@
       drawList();
       const ro = byId("i-ro");
       ro.hidden = writable();
-      ro.textContent = data.mode === "production"
-        ? "Locked pending security review. Production settings are shown read-only: the settings write API stays off until the security review is done."
-        : !canWrite() ? "Writes are not configured on this console, so these settings are read-only."
+      ro.textContent = !canWrite() ? "Writes are not configured on this console, so these settings are read-only."
         : "Settings are read-only: the settings write API is off on this install.";
       byId("i-lock").hidden = !writable();
       byId("s-bar").hidden = !writable();
