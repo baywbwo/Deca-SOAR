@@ -424,3 +424,19 @@ def test_gateway_readyz_answers_internal_callers_only_never_through_the_proxy(co
         assert inside.get("/healthz").status_code == 200
     finally:
         gpool.close()
+
+
+def test_cli_derive_source_key_writes_the_source_subkey_once(tmp_path, monkeypatch):
+    import base64
+
+    from hypersoar import cli
+    from hypersoar.broker.integrations.secretbox import derive
+
+    master = bytes(range(32))
+    monkeypatch.setenv("HYPERSOAR_INTEGRATION_KEY", master.hex())
+    out = tmp_path / "deca_source_key"
+    assert cli.main(["integration", "derive-source-key", "--out", str(out)]) == 0
+    raw = out.read_text().strip()
+    assert base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)) == derive(master, "source")
+    assert out.stat().st_mode & 0o777 == 0o600
+    assert cli.main(["integration", "derive-source-key", "--out", str(out)]) == 2  # never overwrites
