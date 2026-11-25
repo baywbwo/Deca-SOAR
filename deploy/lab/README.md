@@ -109,5 +109,18 @@ and the `.125` addresses, and leave out `HYPERSOAR_REPLAY_DIR`.
 Hourly anchor (the lab has no systemd unit for the overlay): a user crontab line
 `15 * * * * cd $REPO && $C --profile jobs run --rm ledger-anchor >> ~/deca-lab-logs/anchor.log 2>&1`.
 
+Changing the console password. The console login (`secrets/console_password_hash`) and the broker
+re-auth password of the same principal (`set-reauth`) are stored separately; changing one does not change
+the other. Every time `console_password_hash` is replaced, run `set-reauth` for that principal with the
+same new password on the same stack, otherwise human writes from the console are refused:
+```sh
+<new console password> | hypersoar console-hash > console_password_hash.new   # operator machine
+sudo install -m 0400 -o 10001 console_password_hash.new /etc/deca-soar/secrets/console_password_hash
+(<owner DSN>; <new console password>) | sudo ... deploy/deca/bin/deca-owner-run.sh set-reauth --name owner --actor ops
+$C restart console
+```
+A redeploy keeps the existing secrets directory (`lab_setup.py` refuses to overwrite it), so do not
+re-run `set-reauth` with an old password from an earlier setup.
+
 The quick tunnel URL changes whenever the `tunnel` container restarts. To stop everything:
 `$C down` (add `-v` to drop the database volume).
