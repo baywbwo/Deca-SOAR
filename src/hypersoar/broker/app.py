@@ -561,6 +561,9 @@ def _integration_write(request: Request, p: Principal, key: str | None, operatio
         raise HTTPException(422, str(e)) from None
 
 
+_SCHEMAS = {n: m.model_json_schema() for n, m in int_config.MODELS.items()}
+
+
 @app.get("/v1/integrations")
 def list_integrations(request: Request, _: Annotated[Principal, Depends(require(roles.READ))]) -> dict:
     b = request.app.state.broker
@@ -568,7 +571,9 @@ def list_integrations(request: Request, _: Annotated[Principal, Depends(require(
         items = [int_config.view(conn, b.entity_id, n, b.hub.mode) for n in NAMES]
     return {"entity_id": b.entity_id, "mode": b.hub.mode,
             "writes_enabled": os.environ.get("HYPERSOAR_INTEGRATION_WRITES") == "1",
-            "jira_inbound": b.hub.jira_inbound, "integrations": items}
+            "jira_inbound": b.hub.jira_inbound, "integrations": items,
+            # Field types, choices and limits the console builds its settings form from.
+            "schemas": _SCHEMAS}
 
 
 @app.get("/v1/integrations/{name}/history")

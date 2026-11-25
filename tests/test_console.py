@@ -204,7 +204,7 @@ def test_security_headers(console):
 
 
 PAGES = {"/": "overview", "/map": "map", "/cases": "cases", "/approvals": "approvals",
-         "/automation": "automation", "/scenarios": "scenarios"}
+         "/automation": "automation", "/scenarios": "scenarios", "/integrations": "integrations"}
 
 
 def test_static_has_no_inline_code_and_unknown_files_404(console):

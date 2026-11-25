@@ -121,11 +121,11 @@
   const newKey = () => crypto.randomUUID();
   const canWrite = () => !!(shellData && shellData.meta && shellData.meta.writes);
   // {ok, status, data}. A refused write is a normal answer with a message, not an exception.
-  async function post(path, payload, key) {
+  async function post(path, payload, key, method = "POST") {
     let r;
     try {
       r = await fetch(path, {
-        method: "POST", credentials: "same-origin", cache: "no-store",
+        method, credentials: "same-origin", cache: "no-store",
         headers: { "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": key,
                    "X-HyperSoar-CSRF": shellData && shellData.meta ? shellData.meta.csrf : "" },
         body: JSON.stringify(payload || {}),
@@ -146,17 +146,21 @@
     e.textContent = msg || "";
     e.className = bad ? "note bad" : "note";
   }
-  // A write that needs the password again (approve, reject, kill switch, revoke). One dialog, one key per
-  // opening: a double click or a retry after a network error is the same write.
+  // A write that needs the password again (approve, reject, kill switch, revoke, integration settings). One
+  // dialog, one key per opening: a double click or a retry after a network error is the same write.
+  // o.noReason drops the reason box, o.reasonKey sends it under another name (an integration's version note),
+  // o.extra adds inputs [{key, label, attrs, required}] whose values go into the body as typed.
   function confirmWrite(o) {
     const pw = el("input", { type: "password", id: "rw-pw", name: "password", autocomplete: "current-password", required: true, maxlength: 1024 });
-    const reason = el("textarea", { id: "rw-reason", name: "reason", rows: 3, maxlength: 500, required: o.reasonRequired ? true : null });
+    const reason = o.noReason ? null : el("textarea", { id: "rw-reason", name: "reason", rows: 3, maxlength: o.reasonMax || 500, required: o.reasonRequired ? true : null });
+    const extra = (o.extra || []).map((x, i) => ({ ...x, input: el("input", { id: `rw-x${i}`, ...x.attrs }) }));
     const err = el("p", { class: "err", role: "alert" });
     const ok = el("button", { class: "btn pri", type: "submit", text: o.confirm });
     const cancel = el("button", { class: "btn ghost", type: "button", text: "Cancel" });
     const form = el("form", { class: "gate-form", novalidate: true },
       el("h2", { class: "h2", id: "rw-h", text: o.title }), o.text ? el("p", { class: "k", text: o.text }) : null,
-      el("label", { for: "rw-reason", text: o.reasonRequired ? "Reason (required, kept in the audit trail)" : "Reason (optional, kept in the audit trail)" }), reason,
+      extra.map(x => [el("label", { for: x.input.id, text: x.label }), x.input]),
+      reason ? [el("label", { for: "rw-reason", text: o.reasonLabel || (o.reasonRequired ? "Reason (required, kept in the audit trail)" : "Reason (optional, kept in the audit trail)") }), reason] : null,
       el("label", { for: "rw-pw", text: "Your password, to confirm it is you" }), pw, err,
       el("div", { class: "pill-row" }, ok, cancel));
     const dlg = el("dialog", { class: "rw", "aria-labelledby": "rw-h" }, form);
@@ -166,15 +170,18 @@
     dlg.addEventListener("close", () => dlg.remove());
     form.addEventListener("submit", async ev => {
       ev.preventDefault();
-      const r = reason.value.trim();
+      const r = reason ? reason.value.trim() : "";
       if (o.reasonRequired && r.length < 3) { err.textContent = "Write a reason of at least 3 characters."; reason.focus(); return; }
+      const missing = extra.find(x => x.required && !x.input.value.trim());
+      if (missing) { err.textContent = `Fill in ${missing.label.toLowerCase()}.`; missing.input.focus(); return; }
       if (!pw.value) { err.textContent = "Type your password."; pw.focus(); return; }
       ok.disabled = true;
       err.textContent = "";
       const payload = { ...o.body, password: pw.value };
-      if (r) payload.reason = r;
+      if (r) payload[o.reasonKey || "reason"] = r;
+      for (const x of extra) payload[x.key] = x.input.value.trim() || null;
       try {
-        const res = await post(o.path, payload, key);
+        const res = await post(o.path, payload, key, o.method);
         if (res.ok) { dlg.close(); o.done(res); return; }
         err.textContent = res.status === 403 && /re-authentication/.test(why(res)) ? "Wrong password." : why(res);
         pw.value = "";
@@ -182,7 +189,7 @@
       } finally { ok.disabled = false; }
     });
     dlg.showModal();
-    (o.reasonRequired ? reason : pw).focus();
+    (extra.length ? extra[0].input : o.reasonRequired ? reason : pw).focus();
   }
   // A plain write (assign, status, comment, ask AI): the button is disabled while it runs.
   async function quickWrite(btn, path, payload, key) {
@@ -198,6 +205,7 @@
     ["cases", "Cases", "/cases", "cnt-cases"],
     ["approvals", "Approvals", "/approvals", "cnt-approvals"],
     ["automation", "Automation", "/automation", null],
+    ["integrations", "Integrations", "/integrations", null],
     ["scenarios", "Scenario tests", "/scenarios", "cnt-scn", "sbx-only"],
   ];
 
@@ -1073,6 +1081,412 @@
     poll(load);
   }
 
+  // -- 08 integrations ------------------------------------------------------------------------------------
+  // Settings are read from and written to the broker. The form is built from each integration's settings
+  // schema, so a field the broker adds shows up here without a console change. Secrets are write-only: the
+  // broker answers set / rotated / expiry, never a value, and a value typed here goes out once and is dropped.
+  const STATE = { connected: ["ok", "Connected"], warning: ["wait", "Warning"], error: ["hot", "Test failed"],
+    not_tested: ["wait", "Not tested"], disabled: ["", "Off"], not_configured: ["", "Not set up"] };
+  const GROUP = { source: "Data sources · alerts in", notify: "Notifications and approvals", ticketing: "Ticketing", ai: "AI triage" };
+  const BLURB = { lark: "Notifications and approvals", jira: "One ticket per case", ai: "AI model for triage",
+    webhook: "Any SIEM that can POST JSON", syslog: "Firewalls and on-prem SIEM, CEF", sls: "Alibaba Cloud Log Service" };
+  const FIELD = { base_url: "Base URL", app_id: "App ID", chat_id: "Chat ID", chat_name: "Chat name", oncall_dm: "Also message the on-call person",
+    delivery: "Delivery", routing: "Where alerts go", ladder: "Who can approve", role: "Step", approvers: "Approvers",
+    lark_user_id: "Lark user ID", timeout_min: "Wait before the next step (min)", site: "Site URL", email: "Account email",
+    issue_type: "Issue type", title_template: "Issue title", priority_map: "Jira priority per severity", sync: "Keeping it in sync",
+    comment_on_update: "Comment on the issue when the case changes", done_on_close: "Move the issue to Done when the case is closed",
+    close_case_on_done: "Close the case when the issue is moved to Done in Jira", triage_model: "Triage model",
+    fallback_model: "Fallback model", timeout_s: "Timeout (s)", daily_token_limit: "Daily token limit", max_tokens: "Max tokens per answer",
+    prompt_version: "Prompt version", mock_fault: "Mock fault (sandbox tests)", source_type: "Source type", rule_prefix: "Rule prefix",
+    fields: "Field mapping", severity_map: "Severity mapping", max_body_kb: "Max body (KB)", max_skew_s: "Max clock skew (s)",
+    allowed_senders: "Allowed senders (IP or CIDR)", endpoint: "Endpoint", logstore: "Logstore", query: "Query", window_s: "Window (s)",
+    lag_s: "Lag (s)", page: "Page size", src_ip: "Source IP", ua: "User agent", uri: "URI", dst_asset: "Destination asset",
+    access_key_id: "AccessKey ID", detected_at: "Detected at", rule_id: "Rule ID", events: "Event count" };
+  const SECRET = { app_secret: "App secret", verification_token: "Verification token", encrypt_key: "Encrypt key", api_token: "API token",
+    webhook_secret: "Webhook secret", api_key: "API key" };
+  const words = k => k.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+  const clone = v => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+
+  // A schema node with $ref followed and "X or null" unwrapped: [node, nullable].
+  function resolve(s, root) {
+    let nullable = false;
+    for (let i = 0; s && i < 8; i++) {
+      const outer = { default: s.default, title: s.title };
+      if (s.$ref) s = { ...root.$defs[s.$ref.split("/").pop()] };
+      else if (s.anyOf) {
+        const non = s.anyOf.filter(x => x.type !== "null");
+        nullable = nullable || non.length < s.anyOf.length;
+        s = { ...non[0] };
+      } else break;
+      for (const k in outer) if (outer[k] !== undefined) s[k] = outer[k];
+    }
+    return [s || {}, nullable];
+  }
+  function skeleton(s0, root) {
+    const [s, nullable] = resolve(s0, root);
+    if (s.default !== undefined) return clone(s.default);
+    if (nullable) return null;
+    if (s.const !== undefined) return s.const;
+    if (s.enum) return s.enum[0];
+    if (s.type === "object") {
+      const o = {};
+      for (const k of Object.keys(s.properties || {})) o[k] = skeleton(s.properties[k], root);
+      return o;
+    }
+    if (s.type === "array") return Array.from({ length: s.minItems || 0 }, () => skeleton(s.items, root));
+    if (s.type === "boolean") return false;
+    if (s.type === "integer" || s.type === "number") return s.minimum !== undefined ? s.minimum : 0;
+    return "";
+  }
+
+  function integrations() {
+    let data = null;
+    let item = null;
+    let schema = null;
+    let draft = null;
+    let dirty = false;
+    let jsonMode = false;
+    let listKey = "";
+    let fid = 0;
+    const writable = () => canWrite() && !!(data && data.writes_enabled);
+    const sel = () => decodeURIComponent(location.hash.slice(1));
+    const isSource = () => item && item.category === "source";
+    const fixedTarget = () => (data && data.mode === "production") || isSource();
+
+    function changed() {
+      dirty = true;
+      byId("s-save").disabled = !writable();
+      say("s-msg", "Unsaved changes.");
+    }
+
+    // -- the settings form, one control per schema node; obj[key] is the value it edits ------------------
+    function fld(label, control, wide) {
+      return el("label", { class: wide ? "fld wide" : "fld", for: control.id }, el("span", { text: label }), control);
+    }
+    function node(obj, key, s0, label, optional) {
+      const [s, nullable] = resolve(s0, schema);
+      const id = `f${++fid}`;
+      const v = obj[key];
+      const set = x => {
+        if (optional && (x === "" || x === null)) delete obj[key];
+        else obj[key] = x;
+        changed();
+      };
+      if (s.const !== undefined) return el("div", { class: "fld" }, el("span", { text: label }), el("code", { class: "mono", text: String(s.const) }));
+      if (s.enum) {
+        const c = el("select", { id }, nullable || optional ? el("option", { value: "", text: "None" }) : null,
+          s.enum.map(e => el("option", { value: String(e), selected: e === v, text: String(e) })));
+        c.addEventListener("change", () => set(c.value === "" ? null : s.type === "integer" ? Number(c.value) : c.value));
+        return fld(label, c);
+      }
+      if (s.type === "boolean") {
+        const c = el("input", { type: "checkbox", id, checked: !!v });
+        c.addEventListener("change", () => set(c.checked));
+        return el("label", { class: "tg wide", for: id }, c, el("span", { text: label }));
+      }
+      if (s.type === "integer" || s.type === "number") {
+        const c = el("input", { type: "number", id, inputmode: "numeric", step: s.type === "integer" ? 1 : "any", min: s.minimum, max: s.maximum,
+          value: v === null || v === undefined ? "" : v });
+        c.addEventListener("input", () => set(c.value === "" ? (nullable ? null : "") : Number(c.value)));
+        return fld(label, c);
+      }
+      if (s.type === "array") {
+        const list = Array.isArray(v) ? v : (obj[key] = []);
+        const max = s.maxItems || 64;
+        const rows = list.map((_, i) => el("div", { class: "arr-item" }, node(list, i, s.items, `${label} ${i + 1}`),
+          el("button", { class: "btn ghost", type: "button", disabled: list.length <= (s.minItems || 0), "data-del": i, text: "Remove" })));
+        const add = el("button", { class: "btn ghost", type: "button", disabled: list.length >= max, text: `Add ${label.toLowerCase().replace(/s$/, "")}` });
+        const box = el("fieldset", { class: "fset wide" }, el("legend", { text: label }), rows, el("div", { class: "pill-row" }, add));
+        box.addEventListener("click", e => {
+          const b = e.target.closest("button");
+          if (!b || b.closest("fieldset") !== box) return;
+          if (b === add) list.push(skeleton(s.items, schema));
+          else list.splice(Number(b.dataset.del), 1);
+          changed();
+          drawForm();
+        });
+        return box;
+      }
+      if (s.type === "object") {
+        const o = v && typeof v === "object" ? v : (obj[key] = {});
+        if (s.properties) {
+          return el("fieldset", { class: "fset wide" }, el("legend", { text: label }),
+            el("div", { class: "form" }, Object.keys(s.properties).map(k => node(o, k, s.properties[k], FIELD[k] || words(k)))));
+        }
+        const [vs] = resolve(s.additionalProperties || {}, schema);
+        if (s.propertyNames && s.propertyNames.enum) {
+          // A fixed set of keys (severities): scalar values may be left empty, an object value is switched on per key.
+          return el("fieldset", { class: "fset wide" }, el("legend", { text: label }), el("div", { class: "form" },
+            s.propertyNames.enum.map(k => {
+              if (vs.type !== "object") return node(o, k, s.additionalProperties, words(k), true);
+              const on = el("input", { type: "checkbox", id: `f${++fid}`, checked: o[k] !== undefined });
+              on.addEventListener("change", () => {
+                if (on.checked) o[k] = skeleton(s.additionalProperties, schema); else delete o[k];
+                changed();
+                drawForm();
+              });
+              return el("div", { class: "fld wide" }, el("label", { class: "tg", for: on.id }, on, el("span", { text: words(k) })),
+                o[k] !== undefined ? node(o, k, s.additionalProperties, `${words(k)} alerts`) : null);
+            })));
+        }
+        // Free keys (severity names as a source sends them): one row each, renamed in place.
+        const keys = Object.keys(o);
+        const rows = keys.map(k => {
+          const name = el("input", { id: `f${++fid}`, value: k, spellcheck: "false", maxlength: 64, "aria-label": `${label}: source value` });
+          name.addEventListener("change", () => {
+            const nk = name.value.trim();
+            if (!nk || nk === k || nk in o) { name.value = k; return; }
+            const copy = Object.entries(o).map(([a, b]) => [a === k ? nk : a, b]);
+            for (const a of Object.keys(o)) delete o[a];
+            for (const [a, b] of copy) o[a] = b;
+            changed();
+            drawForm();
+          });
+          return el("div", { class: "arr-item kvrow" }, name, node(o, k, s.additionalProperties, `${k} becomes`),
+            el("button", { class: "btn ghost", type: "button", "data-del": k, text: "Remove" }));
+        });
+        const add = el("button", { class: "btn ghost", type: "button", disabled: keys.length >= (s.maxProperties || 64), text: "Add row" });
+        const box = el("fieldset", { class: "fset wide" }, el("legend", { text: label }), rows, el("div", { class: "pill-row" }, add));
+        box.addEventListener("click", e => {
+          const b = e.target.closest("button");
+          if (!b || b.closest("fieldset") !== box) return;
+          if (b === add) { let i = 1; while (`value${i}` in o) i++; o[`value${i}`] = skeleton(s.additionalProperties, schema); }
+          else delete o[b.dataset.del];
+          changed();
+          drawForm();
+        });
+        return box;
+      }
+      const c = el("input", { id, value: v === null || v === undefined ? "" : String(v), maxlength: s.maxLength || 1000, spellcheck: "false",
+        type: key === "email" ? "email" : "text", autocomplete: "off" });
+      c.addEventListener("input", () => set(c.value === "" && nullable ? null : c.value));
+      return fld(label, c, (s.maxLength || 0) > 120 || /url|template|query|site|endpoint/.test(String(key)));
+    }
+
+    function drawForm() {
+      fid = 0;
+      const wrap = { settings: draft.settings };
+      const props = schema.properties || {};
+      const enabled = el("input", { type: "checkbox", id: "f-enabled", checked: draft.enabled });
+      enabled.addEventListener("change", () => { draft.enabled = enabled.checked; changed(); });
+      const f = el("fieldset", { class: "fset bare", disabled: !writable() },
+        el("legend", { class: "vh", text: `${item.label} settings` }),
+        el("label", { class: "tg", for: "f-enabled" }, enabled, el("span", { text: "Enabled. Off keeps the settings but nothing is sent or received." })),
+        el("div", { class: "form" }, Object.keys(props).map(k => node(wrap.settings, k, props[k], FIELD[k] || words(k)))));
+      fill("i-form", f);
+      byId("i-json-text").value = JSON.stringify(draft.settings, null, 2);
+      byId("i-json-text").disabled = !writable();
+      byId("i-json-apply").disabled = !writable();
+    }
+    function drawTarget() {
+      if (fixedTarget()) { fill("i-tgt", el("span", { class: "tag act", text: "Live" })); return; }
+      const b = t => {
+        const x = el("button", { type: "button", "aria-pressed": draft.target === t ? "true" : "false", disabled: !writable(), text: t === "mock" ? "Mock" : "Live" });
+        x.addEventListener("click", () => { draft.target = t; changed(); drawTarget(); });
+        return x;
+      };
+      fill("i-tgt", el("span", { class: "seg", role: "group", "aria-label": "Target" }, b("mock"), b("live")));
+    }
+
+    function drawState() {
+      const [cls, label] = STATE[item.state] || ["", item.state];
+      const row = (k, ...v) => [el("dt", { text: k }), el("dd", {}, ...v)];
+      fill("i-state",
+        row("State", el("span", { class: `tag ${cls}`, text: label })),
+        row("Saved", item.version ? `v${item.version} · target ${item.target} · ${when(item.updated_at)} ${TZL} by ${item.updated_by || "–"}` : "Not set up yet"),
+        row("Active", item.active_version ? `v${item.active_version}${item.active_version === item.version ? "" : " (the saved version is waiting for a passing test)"}` : "None yet. A passing test activates the saved version."),
+        row("Errors, 24 h", n(item.errors_24h)));
+    }
+    function drawSecrets() {
+      const names = Object.keys(item.secrets || {});
+      fill("i-secrets", names.length ? names.map(k => {
+        const st = item.secrets[k];
+        const label = SECRET[k] || words(k);
+        const btn = el("button", { class: "btn ghost", type: "button", "data-secret": k, disabled: !writable() || !item.version,
+          title: !item.version ? "Save the settings first: a secret is sealed for the saved host" : null, text: st.set ? "Replace" : "Set" });
+        const info = st.set ? `rotated ${when(st.rotated_at)} ${TZL} by ${st.rotated_by || "–"}${st.expires_at ? ` · expires ${String(st.expires_at).slice(0, 10)}` : ""}`
+          : st.required ? "required" : "optional";
+        return el("div", { class: "fld" }, el("span", { text: label }),
+          el("div", { class: "secret" }, el("span", { class: st.set ? "set" : "unset", text: st.set ? "Set" : "Not set" }), el("span", { class: "k", text: info }), btn));
+      }) : el("p", { class: "k", text: "This integration needs no secret." }));
+    }
+    function drawSteps(t, fresh) {
+      if (!t) { fill("t-out", el("li", { class: "idle" }, el("span", { class: "st", text: "–" }), el("span", { text: "No test has run for this integration yet." }))); return; }
+      fill("t-out", el("li", { class: t.status === "pass" ? "ok" : "bad" }, el("span", { class: "st", text: t.status === "pass" ? "PASS" : "FAIL" }),
+        el("span", { text: `${fresh ? "Just now" : `Last test ${when(t.finished_at)} ${TZL}`} · version ${t.config_version} · target ${t.target || item.target}` })),
+        (t.steps || []).map(x => el("li", { class: x.ok ? "ok" : "bad" }, el("span", { class: "st", text: x.ok ? "ok" : "fail" }),
+          el("span", {}, x.step, x.detail ? el("span", { class: "k", text: ` · ${x.detail}` }) : null))));
+    }
+    async function drawVersions() {
+      const name = item.integration;
+      const h = item.version ? await api(`/api/integrations/${encodeURIComponent(name)}/history`) : { versions: [] };
+      if (!item || item.integration !== name) return;
+      fill("v-list", h.versions.length ? h.versions.map(x => el("li", { class: "ver" }, el("span", { class: "tm", text: `v${x.version}` }),
+        el("span", { class: "ev" }, `target ${x.target} · ${x.enabled ? "on" : "off"}`,
+          x.version === item.version ? el("span", { class: "tag", text: "saved" }) : null,
+          x.version === item.active_version ? el("span", { class: "tag ok", text: "active" }) : null),
+        el("span", { class: "mono", text: `${when(x.changed_at)} ${TZL} · ${x.changed_by}${x.note ? ` · ${x.note}` : ""}` }),
+        x.version === item.version ? null : el("button", { class: "btn ghost", type: "button", "data-ver": x.version, disabled: !writable(), text: `Roll back to v${x.version}` })))
+        : el("li", {}, el("span", { class: "ev k", text: "No version saved yet." })));
+    }
+
+    function select(name, force) {
+      const next = data.integrations.find(i => i.integration === name) || data.integrations[0];
+      if (!next) return;
+      const switching = !item || item.integration !== next.integration;
+      item = next;
+      schema = data.schemas[item.integration] || { properties: {} };
+      document.querySelectorAll("#i-list [role=tab]").forEach(b => {
+        const on = b.dataset.int === item.integration;
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        b.tabIndex = on ? 0 : -1;
+      });
+      byId("i-panel").setAttribute("aria-labelledby", `tab-${item.integration}`);
+      txt("i-h", item.label);
+      txt("i-sub", BLURB[item.integration] || "");
+      if (switching || force || !dirty) {
+        draft = { target: fixedTarget() ? "live" : item.target || "mock", enabled: item.version ? item.enabled : true,
+          settings: item.settings ? clone(item.settings) : skeleton(schema, schema) };
+        dirty = false;
+        byId("s-save").disabled = true;
+        if (switching) { say("s-msg", ""); say("t-msg", ""); say("v-msg", ""); say("i-sec-msg", ""); }
+        drawForm();
+        drawTarget();
+      }
+      drawState();
+      drawSecrets();
+      if (switching || force) drawSteps(item.last_test);
+      byId("t-run").disabled = !writable() || !item.version;
+      if (switching || force) drawVersions().catch(e => say("v-msg", `Could not load versions (${e.message}).`, true));
+    }
+
+    function drawList() {
+      const key = JSON.stringify(data.integrations.map(i => [i.integration, i.state]));
+      if (key === listKey) return;
+      listKey = key;
+      let last = null;
+      fill("i-list", data.integrations.flatMap(i => {
+        const [cls, label] = STATE[i.state] || ["", i.state];
+        const logo = INTEG[i.integration] ? INTEG[i.integration][0] : i.integration.slice(0, 2).toUpperCase();
+        const out = [];
+        if (i.category !== last) { last = i.category; out.push(el("li", { class: "grp", role: "presentation", text: GROUP[i.category] || words(i.category) })); }
+        out.push(el("li", { role: "presentation" }, el("button", { type: "button", role: "tab", id: `tab-${i.integration}`, "data-int": i.integration,
+          "aria-controls": "i-panel", "aria-selected": "false", tabindex: -1 },
+          el("span", { class: "logo", text: logo }), el("span", { class: "nm", text: i.label }),
+          el("span", { class: "d", text: BLURB[i.integration] || "" }), el("span", { class: `tag ${cls}`, text: label }))));
+        return out;
+      }));
+    }
+
+    async function load(force) {
+      data = await api("/api/integrations");
+      const order = ["source", "notify", "ticketing", "ai"];
+      data.integrations.sort((a, b) => order.indexOf(a.category) - order.indexOf(b.category));
+      drawList();
+      const ro = byId("i-ro");
+      ro.hidden = writable();
+      ro.textContent = !canWrite() ? "Writes are not configured on this console, so these settings are read-only."
+        : "Settings are read-only here: the broker in this mode keeps the settings write API off. Change them on the host with hypersoar integration, then test.";
+      byId("i-lock").hidden = !writable();
+      select(sel() || (item && item.integration), force);
+    }
+
+    byId("i-list").addEventListener("click", e => {
+      const b = e.target.closest("button[data-int]");
+      if (!b || (item && b.dataset.int === item.integration)) return;
+      if (dirty && !confirm("Discard the unsaved changes?")) return;
+      history.replaceState(null, "", `#${b.dataset.int}`);
+      select(b.dataset.int);
+    });
+    byId("i-list").addEventListener("keydown", e => {
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+      const tabs = [...document.querySelectorAll("#i-list [role=tab]")];
+      const i = tabs.indexOf(document.activeElement);
+      const j = e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : (i + (e.key === "ArrowDown" ? 1 : -1) + tabs.length) % tabs.length;
+      e.preventDefault();
+      tabs[j].focus();
+      tabs[j].click();
+    });
+    byId("i-json-btn").addEventListener("click", () => {
+      jsonMode = !jsonMode;
+      byId("i-json-btn").setAttribute("aria-pressed", jsonMode ? "true" : "false");
+      byId("i-json").hidden = !jsonMode;
+      byId("i-form").hidden = jsonMode;
+      drawForm();
+    });
+    const applyJson = () => {
+      try {
+        const v = JSON.parse(byId("i-json-text").value);
+        if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("settings must be a JSON object");
+        draft.settings = v;
+        changed();
+        drawForm();
+        return true;
+      } catch (e) { say("s-msg", `The JSON is not valid: ${e.message}`, true); return false; }
+    };
+    byId("i-json-apply").addEventListener("click", applyJson);
+    byId("s-discard").addEventListener("click", () => { select(item.integration, true); say("s-msg", "Changes discarded."); });
+    byId("s-save").addEventListener("click", () => {
+      if (jsonMode && !applyJson()) return;
+      const name = item.integration;
+      confirmWrite({
+        title: `Save ${item.label} settings`, method: "PUT", path: `/api/integrations/${encodeURIComponent(name)}`,
+        text: `Saved as a new version on target ${draft.target}${draft.enabled ? "" : ", switched off"}. It becomes active after a passing test.`,
+        reasonKey: "note", reasonMax: 200, reasonLabel: "Note (optional, kept with the version)", confirm: "Save",
+        body: { target: draft.target, enabled: draft.enabled, settings: draft.settings },
+        done: async res => {
+          dirty = false;
+          await load(true);
+          say("s-msg", `Saved as version ${res.data.version}. Run the test to make it active.`);
+        },
+      });
+    });
+    byId("i-secrets").addEventListener("click", e => {
+      const b = e.target.closest("button[data-secret]");
+      if (!b) return;
+      const k = b.dataset.secret;
+      const label = SECRET[k] || words(k);
+      confirmWrite({
+        title: `${item.secrets[k].set ? "Replace" : "Set"} ${label.toLowerCase()}`, method: "PUT", noReason: true, confirm: "Save secret",
+        path: `/api/integrations/${encodeURIComponent(item.integration)}/secrets/${encodeURIComponent(k)}`, body: {},
+        text: `For ${item.label}, sealed for the saved host. It cannot be shown again after you save it.`,
+        extra: [{ key: "value", label: `New ${label.toLowerCase()}`, required: true, attrs: { type: "password", autocomplete: "new-password", maxlength: 4096, spellcheck: "false" } },
+                { key: "expires_at", label: "Expires on (optional)", attrs: { type: "date" } }],
+        done: async () => { await load(); say("i-sec-msg", `${label} saved. Run the test to check it.`); },
+      });
+    });
+    byId("t-run").addEventListener("click", () => {
+      const name = item.integration;
+      confirmWrite({
+        title: `Test ${item.label}`, noReason: true, confirm: "Run test", path: `/api/integrations/${encodeURIComponent(name)}/test`, body: {},
+        text: `Calls saved version ${item.version} on target ${item.target}. A pass makes it the active version; a fail leaves v${item.active_version || "–"} active.`,
+        done: async res => {
+          const r = res.data || {};
+          await load(true);
+          if (item.integration === name) {
+            drawSteps({ status: r.status, config_version: r.config_version, steps: r.steps, target: item.target }, true);
+            say("t-msg", r.status === "pass" ? `Passed. Version ${r.config_version} is active.` : "Failed. The saved version stays inactive.", r.status !== "pass");
+          }
+        },
+      });
+    });
+    byId("v-list").addEventListener("click", e => {
+      const b = e.target.closest("button[data-ver]");
+      if (!b) return;
+      const v = Number(b.dataset.ver);
+      if (dirty && !confirm("Discard the unsaved changes?")) return;
+      confirmWrite({
+        title: `Roll back ${item.label} to v${v}`, noReason: true, confirm: "Roll back",
+        path: `/api/integrations/${encodeURIComponent(item.integration)}/rollback`, body: { version: v },
+        text: `Saves the settings of v${v} again as a new version. Run the test to make it active.`,
+        done: async res => { dirty = false; await load(true); say("v-msg", `Rolled back: v${v} saved again as v${res.data.version}. Run the test to make it active.`); },
+      });
+    });
+    window.addEventListener("hashchange", () => { if (data && sel() !== (item && item.integration) && (!dirty || confirm("Discard the unsaved changes?"))) select(sel()); });
+    window.addEventListener("beforeunload", e => { if (dirty) e.preventDefault(); });
+    poll(load);
+  }
+
   // -- 06 scenario tests (sandbox only) -------------------------------------------------------------------
   function scenarios() {
     const RES = { pass: ["pass", "PASS"], fail: ["fail", "FAIL"], error: ["fail", "ERROR"] };
@@ -1122,7 +1536,7 @@
 
   // -- start ----------------------------------------------------------------------------------------------
   buildShell();
-  const SCREENS = { overview, map: threatMap, cases, approvals, automation, scenarios };
+  const SCREENS = { overview, map: threatMap, cases, approvals, automation, integrations, scenarios };
   (async () => {
     try { await refreshShell(); } catch (e) { if (e instanceof LoginRequired) return; showError(`Could not load the header (${e.message}).`); }
     setInterval(() => { if (!document.hidden) refreshShell().catch(() => {}); }, POLL_MS);

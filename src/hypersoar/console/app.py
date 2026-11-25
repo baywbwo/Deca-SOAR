@@ -48,7 +48,7 @@ COOKIE = "__Host-hypersoar_console"
 MAX_BODY = 16384  # a 2000-character comment in any script, plus JSON
 # Screens of the v3 console. Each is a static page with no inline code, filled by console.js from /api/*.
 PAGES = {"/": "overview.html", "/map": "map.html", "/cases": "cases.html", "/approvals": "approvals.html",
-         "/automation": "automation.html", "/scenarios": "scenarios.html"}
+         "/automation": "automation.html", "/scenarios": "scenarios.html", "/integrations": "integrations.html"}
 # Sandbox tools: production answers 404 for these, so they are not just hidden but absent.
 SANDBOX_ONLY = {"/scenarios", "/api/scenarios"}
 STATIC_FILES = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8",
@@ -537,6 +537,29 @@ async def w_status(request: Request, case_id: str):
 @fastapi_app.post("/api/cases/{case_id}/comments")
 async def w_comment(request: Request, case_id: str):
     return await _write(request, lambda d, conn, inst: cw.comment(case_id, d))
+
+
+def _broker_read(request: Request, path: str):
+    """Integration settings live behind the broker (secrets, versions, tests), so the console reads them
+    there with its own token; the broker view carries secret status only, never a value."""
+    if not _session(request):
+        return JSONResponse({"detail": "login required"}, status_code=401)
+    if request.app.state.broker is None:
+        return JSONResponse({"detail": "the broker is not configured on this console"}, status_code=503)
+    status, out = request.app.state.broker.send("GET", path, None, None)
+    return JSONResponse(out, status_code=status)
+
+
+@fastapi_app.get("/api/integrations")
+def api_integrations(request: Request):
+    return _broker_read(request, "/v1/integrations")
+
+
+@fastapi_app.get("/api/integrations/{name}/history")
+def api_integration_history(request: Request, name: str):
+    if not cw.INTEGRATION.match(name):
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    return _broker_read(request, f"/v1/integrations/{name}/history")
 
 
 @fastapi_app.put("/api/integrations/{name}")

@@ -204,7 +204,7 @@ def ask_ai(conn, entity_id: str, request_id: str, data) -> Plan:
     return Plan("/v1/triage", {"alert_id": str(r["alert_id"])}, False)
 
 
-# -- integration settings (backend only; the screen is not built yet). The broker keeps them off unless
+# -- integration settings (the Integrations screen). The broker keeps them off unless
 # HYPERSOAR_INTEGRATION_WRITES=1 and checks the person's password, the role and the Idempotency-Key.
 def _integration(name: str) -> str:
     if not INTEGRATION.match(name):

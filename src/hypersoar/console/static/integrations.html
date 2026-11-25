@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/console.css"><script src="/static/console.js" defer></script>
+<title>Integrations · HyperSoar</title></head>
+<body class="app" data-screen="integrations">
+<main class="wrap">
+  <p class="banner" id="error" role="alert" hidden></p>
+  <div class="ihead">
+    <div><p class="eyebrow">Settings</p><h1 class="h1">Integrations</h1>
+      <p class="k">Where alerts come from, where people are told, where tickets go and which AI model triages. Each change is a new version, kept for rollback.</p></div>
+    <span class="locked" id="i-lock">Owner role only · saving asks for your password again</span>
+  </div>
+  <p class="banner warn" id="i-ro" hidden></p>
+  <div class="cols c-1-2">
+    <aside class="stack">
+      <section class="pnl" aria-label="Integrations">
+        <ul class="ilist" id="i-list" role="tablist" aria-orientation="vertical"></ul>
+      </section>
+      <section class="pnl"><div class="pnl-h"><h2>How secrets are kept</h2></div>
+        <ul class="keep pnl-b">
+          <li>Secret values are write-only. Nobody can read them back from this page, the API or the logs.</li>
+          <li>Stored encrypted for the saved host. Only the broker can decrypt them, the console cannot.</li>
+          <li>Sandbox and Production keep separate settings, secrets and targets.</li>
+          <li>Every change is written to the audit trail with who, when and which fields changed. Values are never written.</li>
+        </ul>
+      </section>
+    </aside>
+    <div class="stack" id="i-detail">
+      <section class="pnl ipanel" role="tabpanel" id="i-panel" aria-labelledby="i-h">
+        <div class="pnl-h"><h2 id="i-h">–</h2><span class="sub" id="i-sub"></span><span class="r tgt-sel" id="i-tgt"></span></div>
+        <div class="fsec"><h3>State</h3><dl class="kv" id="i-state"></dl></div>
+        <div class="fsec"><h3>Secrets</h3><div class="form" id="i-secrets"></div><p class="note" id="i-sec-msg" role="status" aria-live="polite"></p></div>
+        <div class="fsec"><div class="fsec-h"><h3>Settings</h3><button class="btn ghost" type="button" id="i-json-btn" aria-pressed="false">Edit as JSON</button></div>
+          <div id="i-form"></div>
+          <div id="i-json" hidden><label class="fld wide"><span>Settings as JSON</span><textarea id="i-json-text" rows="16" spellcheck="false"></textarea></label>
+            <div class="pill-row"><button class="btn ghost" type="button" id="i-json-apply">Use this JSON</button></div></div>
+        </div>
+      </section>
+      <section class="pnl"><div class="pnl-h"><h2>Test connection</h2><span class="sub" id="t-sub">Calls the saved target. A passing test makes the saved version the active one.</span>
+        <button class="btn ghost r" type="button" id="t-run" disabled>Run test</button></div>
+        <ol class="checks" id="t-out"></ol>
+        <p class="note pnl-b" id="t-msg" role="status" aria-live="polite"></p>
+      </section>
+      <section class="pnl"><div class="pnl-h"><h2>Versions</h2><span class="sub">Rollback saves the chosen version again as a new one, then it needs a passing test.</span></div>
+        <ol class="ledger" id="v-list"></ol>
+        <p class="note pnl-b" id="v-msg" role="status" aria-live="polite"></p>
+      </section>
+      <div class="savebar">
+        <span class="k">Changes take effect after you save and the test passes. The previous settings are kept for one-click rollback.</span>
+        <p class="note" id="s-msg" role="status" aria-live="polite"></p>
+        <button class="btn ghost" type="button" id="s-discard">Discard</button><button class="btn pri" type="button" id="s-save" disabled>Save changes</button>
+      </div>
+    </div>
+  </div>
+</main>
+</body></html>
