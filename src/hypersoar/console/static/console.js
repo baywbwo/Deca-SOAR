@@ -144,7 +144,8 @@
     const e = byId(id);
     if (!e) return;
     e.textContent = msg || "";
-    e.className = bad ? "note bad" : "note";
+    e.classList.add("note");
+    e.classList.toggle("bad", !!bad);
   }
   // A write that needs the password again (approve, reject, kill switch, revoke, integration settings). One
   // dialog, one key per opening: a double click or a retry after a network error is the same write.
@@ -1463,6 +1464,7 @@
         done: async res => {
           const r = res.data || {};
           await load(true);
+          say("s-msg", "");
           if (item.integration === name) {
             drawSteps({ status: r.status, config_version: r.config_version, steps: r.steps, target: item.target }, true);
             say("t-msg", r.status === "pass" ? `Passed. Version ${r.config_version} is active.` : "Failed. The saved version stays inactive.", r.status !== "pass");
@@ -1479,7 +1481,7 @@
         title: `Roll back ${item.label} to v${v}`, noReason: true, confirm: "Roll back",
         path: `/api/integrations/${encodeURIComponent(item.integration)}/rollback`, body: { version: v },
         text: `Saves the settings of v${v} again as a new version. Run the test to make it active.`,
-        done: async res => { dirty = false; await load(true); say("v-msg", `Rolled back: v${v} saved again as v${res.data.version}. Run the test to make it active.`); },
+        done: async res => { dirty = false; await load(true); say("s-msg", ""); say("v-msg", `Rolled back: v${v} saved again as v${res.data.version}. Run the test to make it active.`); },
       });
     });
     window.addEventListener("hashchange", () => { if (data && sel() !== (item && item.integration) && (!dirty || confirm("Discard the unsaved changes?"))) select(sel()); });
