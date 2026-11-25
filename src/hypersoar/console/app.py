@@ -48,9 +48,7 @@ COOKIE = "__Host-hypersoar_console"
 MAX_BODY = 16384  # a 2000-character comment in any script, plus JSON
 # Screens of the v3 console. Each is a static page with no inline code, filled by console.js from /api/*.
 PAGES = {"/": "overview.html", "/map": "map.html", "/cases": "cases.html", "/approvals": "approvals.html",
-         "/automation": "automation.html", "/scenarios": "scenarios.html", "/integrations": "integrations.html"}
-# Sandbox tools: production answers 404 for these, so they are not just hidden but absent.
-SANDBOX_ONLY = {"/scenarios", "/api/scenarios"}
+         "/automation": "automation.html", "/integrations": "integrations.html"}
 STATIC_FILES = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8",
                 "intercept.svg": "image/svg+xml", "worldmap.svg": "image/svg+xml", "icon.svg": "image/svg+xml",
                 "geist-sans.woff2": "font/woff2", "geist-mono.woff2": "font/woff2"}
@@ -340,8 +338,6 @@ def _page(request: Request, path: str, name: str):
     page = (STATIC / name).read_text()
     # Production hides sandbox-only parts server side, so they never flash before console.js runs.
     if _production(request):
-        if path in SANDBOX_ONLY:
-            return Response(status_code=404)
         page = page.replace('<body class="app"', '<body class="app prod"', 1)
     return HTMLResponse(page)
 
@@ -430,13 +426,6 @@ def api_automation(request: Request):
     st = request.app.state
     return _api(request, lambda conn, inst, s: {**views.automation(conn, inst, st.catalog),
                                                 "ledger": {**st.ledger.get(conn), "tail": queries.ledger_tail(conn)}})
-
-
-@fastapi_app.get("/api/scenarios")
-def api_scenarios(request: Request):
-    # Scenario tests are a sandbox tool: production has no such endpoint.
-    return _api(request, lambda conn, inst, s: JSONResponse({"detail": "not found"}, status_code=404)
-                if inst["mode"] != "sandbox" else views.scenarios(conn, inst))
 
 
 @fastapi_app.get("/api/state")
@@ -552,7 +541,13 @@ def _broker_read(request: Request, path: str):
 
 @fastapi_app.get("/api/integrations")
 def api_integrations(request: Request):
-    return _broker_read(request, "/v1/integrations")
+    r = _broker_read(request, "/v1/integrations")
+    if r.status_code != 200:
+        return r
+    # Health of each data source, from the alerts it delivered (the console's own read-only view).
+    out = json.loads(r.body)
+    out["health"] = _api(request, lambda conn, inst, s: views.source_health(conn, inst))
+    return out
 
 
 @fastapi_app.get("/api/integrations/{name}/history")

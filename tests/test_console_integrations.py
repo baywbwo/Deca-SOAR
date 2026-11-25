@@ -121,3 +121,111 @@ def test_production_shows_the_screen_read_only(wired, env):
         assert r.status_code == 403
     finally:
         inst.get = real
+
+
+def _ai(c):
+    return next(i for i in c.get("/api/integrations").json()["integrations"] if i["integration"] == "ai")
+
+
+def test_writes_without_csrf_reauth_or_idempotency_are_refused(wired, env):
+    c, csrf = wired
+    env.setenv("HYPERSOAR_INTEGRATION_WRITES", "1")
+    ai = _ai(c)
+    body = json.dumps({"target": "mock", "enabled": True, "settings": ai["settings"], "password": PASSWORD})
+    base = {"content-type": "application/json", "idempotency-key": secrets.token_hex(8), **ORIGIN}
+    for path, method in (("/api/integrations/ai", "PUT"), ("/api/integrations/ai/test", "POST"),
+                         ("/api/integrations/ai/rollback", "POST"), ("/api/integrations/ai/secrets/api_key", "PUT")):
+        r = c.request(method, path, content=body, headers=base)
+        assert r.status_code == 403 and "CSRF" in r.json()["detail"], path
+        r = c.request(method, path, content=body, headers={**base, "x-hypersoar-csrf": "x" * len(csrf)})
+        assert r.status_code == 403, path
+        r = c.request(method, path, content=body, headers={**base, "x-hypersoar-csrf": csrf, "origin": "https://evil.example"})
+        assert r.status_code == 403, path
+        h = {k: v for k, v in base.items() if k != "idempotency-key"}
+        assert c.request(method, path, content=body, headers={**h, "x-hypersoar-csrf": csrf}).status_code == 422, path
+    no_pw = {"target": "mock", "enabled": True, "settings": ai["settings"]}
+    r = _send(c, csrf, "PUT", "/api/integrations/ai", no_pw)
+    assert r.status_code in (403, 422), r.text
+    assert _ai(c)["version"] == ai["version"]  # nothing was saved by any of them
+
+
+@pytest.mark.parametrize("name,patch,why", [
+    ("ai", {"base_url": "https://10.0.0.5/v1"}, "IP address"),
+    ("ai", {"base_url": "https://127.0.0.1:8443/v1"}, "IP address"),
+    ("ai", {"base_url": "https://llm.internal.corp/v1"}, "allowlist"),
+    ("jira", {"site": "https://192.168.1.20"}, "IP address"),
+    ("jira", {"site": "https://jira.internal.corp"}, "allowlist"),
+    ("lark", {"base_url": "https://169.254.169.254"}, "IP address"),
+])
+def test_live_targets_on_internal_or_unlisted_hosts_are_refused(wired, env, name, patch, why):
+    c, csrf = wired
+    env.setenv("HYPERSOAR_INTEGRATION_WRITES", "1")
+    item = next(i for i in c.get("/api/integrations").json()["integrations"] if i["integration"] == name)
+    settings = dict(item["settings"] or {}, **patch)
+    r = _send(c, csrf, "PUT", f"/api/integrations/{name}",
+              {"target": "live", "enabled": True, "settings": settings, "password": PASSWORD})
+    assert r.status_code == 422 and why in r.json()["detail"], r.text
+    after = next(i for i in c.get("/api/integrations").json()["integrations"] if i["integration"] == name)
+    assert after["version"] == item["version"]
+
+
+def test_secrets_are_deleted_when_the_host_changes(wired, env):
+    c, csrf = wired
+    env.setenv("HYPERSOAR_INTEGRATION_WRITES", "1")
+    ai = _ai(c)
+    r = _send(c, csrf, "PUT", "/api/integrations/ai/secrets/api_key", {"value": "k-" + "a" * 30, "password": PASSWORD})
+    assert r.status_code == 200, r.text
+    assert _ai(c)["secrets"]["api_key"]["set"] is True
+    same = dict(ai["settings"], timeout_s=10)  # same host: the key stays
+    assert _send(c, csrf, "PUT", "/api/integrations/ai",
+                 {"target": "mock", "enabled": True, "settings": same, "password": PASSWORD}).status_code == 200
+    assert _ai(c)["secrets"]["api_key"]["set"] is True
+    moved = dict(same, base_url="https://other-llm.example.com/v1")  # mock target: any host, but the key is not carried over
+    r = _send(c, csrf, "PUT", "/api/integrations/ai", {"target": "mock", "enabled": True, "settings": moved, "password": PASSWORD})
+    assert r.status_code == 200, r.text
+    assert _ai(c)["secrets"]["api_key"]["set"] is False
+
+
+def test_production_refuses_every_integration_write(wired, env):
+    c, csrf = wired
+    from hypersoar.console.app import fastapi_app
+    inst = fastapi_app.state.install
+    real = inst.get
+    inst.get = lambda pool: {**real(pool), "mode": "production"}
+    try:
+        ai = _ai(c)
+        for method, path, body in (
+                ("PUT", "/api/integrations/ai", {"target": "live", "enabled": True, "settings": ai["settings"]}),
+                ("PUT", "/api/integrations/ai/secrets/api_key", {"value": "k-" + "b" * 30}),
+                ("POST", "/api/integrations/ai/rollback", {"version": 1}),
+                ("POST", "/api/integrations/ai/test", {})):
+            r = _send(c, csrf, method, path, {**body, "password": PASSWORD})
+            assert r.status_code == 403 and "disabled" in r.json()["detail"], (path, r.text)
+        assert _ai(c)["version"] == ai["version"] and _ai(c)["secrets"]["api_key"]["set"] is False
+    finally:
+        inst.get = real
+
+
+def test_listing_carries_allowlist_presets_and_source_health(wired, env):
+    from hypersoar.sources import presets
+    c, csrf = wired
+    j = c.get("/api/integrations").json()
+    assert j["allowed_hosts"] == {"lark": ["open.larksuite.com"], "jira": [".atlassian.net"],
+                                  "sls": [".log.aliyuncs.com"], "ai": ["9router.sandbox.invalid"]}
+    assert set(j["presets"]) == set(presets.PRESETS) and all("sample" not in p for p in j["presets"].values())
+    assert j["tokenized"] == ["src_ip", "principal", "access_key_id"]
+    assert set(j["health"]) == {"sls", "webhook", "syslog"}
+    assert all(set(h) == {"alerts_24h", "last_alert"} for h in j["health"].values())
+
+
+def test_every_preset_validates_and_maps_its_sample():
+    from hypersoar.sources import mapping, models, presets
+    base = {"webhook": {}, "sls": {"endpoint": "https://ap-southeast-5.log.aliyuncs.com", "project": "p-1",
+                                   "logstore": "waf-logstore"}}
+    for name, p in presets.PRESETS.items():
+        s = presets.apply(name, base[p["connector"]])
+        model = {"webhook": models.WebhookSettings, "sls": models.SlsSettings}[p["connector"]].model_validate(s)
+        raw = mapping.to_raw(p["sample"], model, f"{p['connector']}://t")
+        assert raw["rule_id"] and raw["rule_id"].startswith(s["rule_prefix"]), name
+        assert raw.get("src_ip") == "203.0.113.9", name
+        assert set(p["settings"]["fields"]) == set(models.FieldMap.model_fields), name

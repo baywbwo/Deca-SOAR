@@ -204,7 +204,7 @@ def test_security_headers(console):
 
 
 PAGES = {"/": "overview", "/map": "map", "/cases": "cases", "/approvals": "approvals",
-         "/automation": "automation", "/scenarios": "scenarios", "/integrations": "integrations"}
+         "/automation": "automation", "/integrations": "integrations"}
 
 
 def test_static_has_no_inline_code_and_unknown_files_404(console):
@@ -235,7 +235,7 @@ def test_pages_and_api_need_a_session(console):
         r = console.get(path, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/login", path
     for path in ("/api/shell", "/api/overview", "/api/map?w=1h", "/api/cases", "/api/cases/CS-1001",
-                 "/api/approvals", "/api/automation", "/api/scenarios", "/api/state"):
+                 "/api/approvals", "/api/automation", "/api/state"):
         r = console.get(path)
         assert r.status_code == 401 and r.json() == {"detail": "login required"}, path
 
@@ -253,8 +253,11 @@ def test_pages_render_with_csp_and_sandbox_marker(console):
 
 
 def test_production_marks_pages_and_has_no_scenarios(console):
-    from hypersoar.console.app import fastapi_app
+    from hypersoar.console.app import STATIC, fastapi_app
     assert _login(console).status_code == 303
+    # The scenario screen left the console in both modes (the CLI still runs them in the sandbox).
+    assert console.get("/scenarios").status_code == 404 and console.get("/api/scenarios").status_code == 404
+    assert not (STATIC / "scenarios.html").exists() and "/scenarios" not in (STATIC / "console.js").read_text()
     console_env_install = fastapi_app.state.install
     real = console_env_install.get
     console_env_install.get = lambda pool: {"mode": "production", "entity_id": "dob"}
@@ -358,7 +361,7 @@ def test_new_api_shapes_and_no_raw_addresses(client, principals, pool, settings,
         assert _login(c).status_code == 303
         out = {p: c.get(p) for p in ("/api/shell", "/api/overview", "/api/map?w=15m", "/api/map?w=24h",
                                      "/api/cases?status=open", "/api/cases?status=closed", "/api/approvals",
-                                     "/api/automation", "/api/scenarios")}
+                                     "/api/automation")}
         assert all(r.status_code == 200 for r in out.values()), {p: r.status_code for p, r in out.items()}
         cases = out["/api/cases?status=open"].json()["cases"]
         details = [c.get(f"/api/cases/{x['case_id']}") for x in cases]

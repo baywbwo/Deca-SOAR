@@ -8,9 +8,20 @@
   <div class="ihead">
     <div><p class="eyebrow">Settings</p><h1 class="h1">Integrations</h1>
       <p class="k">Where alerts come from, where people are told, where tickets go and which AI model triages. Each change is a new version, kept for rollback.</p></div>
-    <span class="locked" id="i-lock">Owner role only · saving asks for your password again</span>
+    <div class="ihead-r"><span class="locked" id="i-lock">Owner role only · saving asks for your password again</span>
+      <button class="btn pri" type="button" id="i-add" aria-expanded="false" aria-controls="i-cat" hidden>+ Add integration</button></div>
   </div>
   <p class="banner warn" id="i-ro" hidden></p>
+  <section class="pnl" id="i-cat" aria-labelledby="cat-h" hidden>
+    <div class="pnl-h"><h2 id="cat-h">Add integration</h2><span class="sub">A SIEM connects through the generic webhook with a starting field map. You review it, save, set the secret and test, like any other change.</span>
+      <button class="btn ghost r" type="button" id="cat-close">Close</button></div>
+    <div class="cat">
+      <div class="cat-g"><h3>Data sources</h3><ul class="cat-list" id="cat-src"></ul>
+        <p class="note">One webhook source per install for now: a preset replaces the webhook settings draft, and the version in use stays under Versions for rollback.</p></div>
+      <div class="cat-g"><h3>AI triage</h3><ul class="cat-list" id="cat-ai"></ul>
+        <h3>Planned</h3><ul class="cat-list" id="cat-plan"></ul></div>
+    </div>
+  </section>
   <div class="cols c-1-2">
     <aside class="stack">
       <section class="pnl" aria-label="Integrations">
@@ -29,15 +40,18 @@
       <section class="pnl ipanel" role="tabpanel" id="i-panel" aria-labelledby="i-h">
         <div class="pnl-h"><h2 id="i-h">–</h2><span class="sub" id="i-sub"></span><span class="r tgt-sel" id="i-tgt"></span></div>
         <div class="fsec"><h3>State</h3><dl class="kv" id="i-state"></dl></div>
+        <div class="fsec" id="i-hsec" hidden><h3>Health</h3><dl class="kv" id="i-health"></dl></div>
         <div class="fsec"><h3>Secrets</h3><div class="form" id="i-secrets"></div><p class="note" id="i-sec-msg" role="status" aria-live="polite"></p></div>
+        <div class="fsec" id="i-src" hidden></div>
         <div class="fsec"><div class="fsec-h"><h3>Settings</h3><button class="btn ghost" type="button" id="i-json-btn" aria-pressed="false">Edit as JSON</button></div>
+          <p class="note" id="i-host" role="status" aria-live="polite" hidden></p>
           <div id="i-form"></div>
           <div id="i-json" hidden><label class="fld wide"><span>Settings as JSON</span><textarea id="i-json-text" rows="16" spellcheck="false"></textarea></label>
             <div class="pill-row"><button class="btn ghost" type="button" id="i-json-apply">Use this JSON</button></div></div>
         </div>
       </section>
       <section class="pnl"><div class="pnl-h"><h2>Test connection</h2><span class="sub" id="t-sub">Calls the saved target. A passing test makes the saved version the active one.</span>
-        <button class="btn ghost r" type="button" id="t-run" disabled>Run test</button></div>
+        <button class="btn ghost r" type="button" id="t-run" hidden>Run test</button></div>
         <ol class="checks" id="t-out"></ol>
         <p class="note pnl-b" id="t-msg" role="status" aria-live="polite"></p>
       </section>

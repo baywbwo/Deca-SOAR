@@ -28,13 +28,14 @@ from hypersoar.broker.integrations import NAMES, config as int_config, secretbox
 from hypersoar.broker.integrations import hub as hub_mod
 from hypersoar.broker.integrations import lark as lark_mod
 from hypersoar.broker.roles import Principal
-from hypersoar.common import entity as entity_mod
+from hypersoar.common import egress, entity as entity_mod
 from hypersoar.common.config import ConfigError, Settings, assert_no_write_credentials
 from hypersoar.common.db import make_pool
 from hypersoar.common.dbguard import assert_least_privilege_login
 from hypersoar.common.http import DEFAULT_MAX_BODY, BodyLimit
 from hypersoar.common.pii import Vault
 from hypersoar.console.auth import LoginLimiter
+from hypersoar.sources import presets
 
 log = logging.getLogger("hypersoar.broker")
 
@@ -573,7 +574,10 @@ def list_integrations(request: Request, _: Annotated[Principal, Depends(require(
             "writes_enabled": os.environ.get("HYPERSOAR_INTEGRATION_WRITES") == "1",
             "jira_inbound": b.hub.jira_inbound, "integrations": items,
             # Field types, choices and limits the console builds its settings form from.
-            "schemas": _SCHEMAS}
+            "schemas": _SCHEMAS,
+            # Hosts a live target may use (read-only here; the allowlist is changed on the host, not the screen).
+            "allowed_hosts": {n: list(egress.allowed(n)) for n in (*egress.ALLOW, "ai")},
+            "presets": presets.view(), "tokenized": list(presets.TOKENIZED)}
 
 
 @app.get("/v1/integrations/{name}/history")

@@ -43,18 +43,11 @@ def shell(conn, inst: dict) -> dict:
         "   AND (expires_at IS NULL OR expires_at > now())) AS pending,"
         " (SELECT max(ingested_at) FROM gateway.inbox_event WHERE entity_id = %(e)s) AS last_ingest",
         {"e": e}).fetchone()
-    latest = None
-    if inst["mode"] == "sandbox":
-        latest = conn.execute(
-            "SELECT count(*) FILTER (WHERE status = 'pass') AS passed, count(*) AS total FROM qa.scenario_run"
-            " WHERE run_id = (SELECT run_id FROM qa.scenario_run WHERE entity_id = %s"
-            "                 ORDER BY finished_at DESC LIMIT 1)", (e,)).fetchone()
     ai = conn.execute(
         "SELECT target, settings ->> 'triage_model' AS model FROM broker.integration_config"
         " WHERE entity_id = %s AND integration = 'ai' AND mode = %s", (e, inst["mode"])).fetchone()
     return {
         "open_cases": n["open_cases"], "pending": n["pending"], "last_ingest": _iso(n["last_ingest"]),
-        "scenarios": dict(latest) if latest and latest["total"] else None,
         "ai": {"target": ai["target"], "model": _clip(ai["model"], 40)} if ai else None,
     }
 
@@ -496,54 +489,18 @@ def automation(conn, inst: dict, catalog: list[dict] | None) -> dict:
     }
 
 
-# -- scenario tests (sandbox only) -----------------------------------------------------------------------
-def scenarios(conn, inst: dict) -> dict:
-    e = inst["entity_id"]
-    run = conn.execute("SELECT run_id FROM qa.scenario_run WHERE entity_id = %s ORDER BY finished_at DESC LIMIT 1",
-                       (e,)).fetchone()
-    rows = [] if run is None else conn.execute(
-        "SELECT scenario, title, status, checks, failures, duration_ms, git_sha, started_at, finished_at"
-        " FROM qa.scenario_run WHERE run_id = %s ORDER BY started_at, scenario", (run["run_id"],)).fetchall()
-    history = conn.execute(
-        "SELECT run_id, min(started_at) AS started, max(finished_at) AS finished, count(*) AS total,"
-        " count(*) FILTER (WHERE status = 'pass') AS passed FROM qa.scenario_run WHERE entity_id = %s"
-        " GROUP BY run_id ORDER BY finished DESC LIMIT 6", (e,)).fetchall()
-    seed = conn.execute(
-        "SELECT count(*) AS n1h, count(*) FILTER (WHERE ingested_at > now() - interval '10 minutes') AS n10m"
-        " FROM gateway.inbox_event WHERE entity_id = %s AND ingested_at > now() - interval '1 hour'"
-        " AND alert ->> 'raw_ref' = 'synthetic://lab'", (e,)).fetchone()
-    spark = conn.execute(
-        "SELECT m.minute, count(i.alert_id) AS n FROM generate_series(date_trunc('minute', now()) - interval '59 minutes',"
-        " date_trunc('minute', now()), interval '1 minute') AS m(minute) LEFT JOIN gateway.inbox_event i"
-        " ON i.entity_id = %s AND i.alert ->> 'raw_ref' = 'synthetic://lab' AND i.ingested_at >= m.minute"
-        " AND i.ingested_at < m.minute + interval '1 minute' GROUP BY m.minute ORDER BY m.minute", (e,)).fetchall()
-    mix = conn.execute(
-        "SELECT coalesce(alert ->> 'category', 'Uncatalogued') AS category, count(*) AS n FROM gateway.inbox_event"
-        " WHERE entity_id = %s AND ingested_at > now() - interval '24 hours' AND alert ->> 'raw_ref' = 'synthetic://lab'"
-        " GROUP BY 1 ORDER BY n DESC LIMIT 5", (e,)).fetchall()
-    mix_total = sum(m["n"] for m in mix) or 1
-    return {
-        "run": None if run is None else {
-            "run_id": str(run["run_id"]), "total": len(rows), "passed": sum(r["status"] == "pass" for r in rows),
-            "started_at": _iso(min(r["started_at"] for r in rows)), "finished_at": _iso(max(r["finished_at"] for r in rows)),
-            "git_sha": _clip(rows[0]["git_sha"], 12) if rows else None,
-            "scenarios": [{"id": r["scenario"], "title": _clip(r["title"], 120), "status": r["status"],
-                           "ms": r["duration_ms"],
-                           "checks": [{"name": _clip(c.get("name"), 60), "ok": bool(c.get("ok"))}
-                                      for c in r["checks"] if isinstance(c, dict)][:16],
-                           "failures": [{"name": _clip(f.get("name"), 60), "expected": _show(f.get("want")),
-                                         "got": _show(f.get("got"))} for f in r["failures"]
-                                        if isinstance(f, dict)][:6]}
-                          for r in rows]},
-        "history": [{"run_id": str(h["run_id"]), "finished_at": _iso(h["finished"]), "total": h["total"],
-                     "passed": h["passed"]} for h in history],
-        "seeding": {"per_min_10m": round(seed["n10m"] / 10, 1), "last_hour": seed["n1h"],
-                    "spark": [s["n"] for s in spark],
-                    "mix": [{"category": _clip(m["category"], 60), "pct": round(100 * m["n"] / mix_total)} for m in mix]},
-    }
+# -- integrations: data-source health ---------------------------------------------------------------------
+SOURCE_REFS = ("sls", "webhook", "syslog")
 
 
-def _show(v) -> str | None:
-    if v is None or isinstance(v, str):
-        return _clip(v, 160)
-    return _clip(json.dumps(v, sort_keys=True, default=str), 160)
+def source_health(conn, inst: dict) -> dict:
+    """Alerts each data source delivered in the last 24 hours, by the raw_ref scheme it stamps on them."""
+    rows = conn.execute(
+        "SELECT split_part(alert ->> 'raw_ref', '://', 1) AS src, count(*) AS n, max(ingested_at) AS last"
+        " FROM gateway.inbox_event WHERE entity_id = %s AND ingested_at > now() - interval '24 hours'"
+        " AND split_part(alert ->> 'raw_ref', '://', 1) = ANY(%s) GROUP BY 1",
+        (inst["entity_id"], list(SOURCE_REFS))).fetchall()
+    got = {r["src"]: r for r in rows}
+    return {k: {"alerts_24h": got[k]["n"] if k in got else 0, "last_alert": _iso(got[k]["last"]) if k in got else None}
+            for k in SOURCE_REFS}
+

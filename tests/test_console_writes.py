@@ -287,7 +287,7 @@ def test_production_has_no_scenario_page(console):
         assert console.get("/api/shell").json()["mode"] == "production"
     finally:
         inst.get = real
-    assert console.get("/scenarios").status_code == 200
+    assert console.get("/scenarios").status_code == 404  # gone from the sandbox console too
 
 
 def test_scenario_cli_refuses_production_before_touching_the_database(monkeypatch, tmp_path):

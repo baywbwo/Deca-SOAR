@@ -184,7 +184,7 @@
       try {
         const res = await post(o.path, payload, key, o.method);
         if (res.ok) { dlg.close(); o.done(res); return; }
-        err.textContent = res.status === 403 && /re-authentication/.test(why(res)) ? "Wrong password." : why(res);
+        err.textContent = res.status === 403 && /re-authentication/.test(why(res)) ? "Wrong password." : o.fail ? o.fail(res) : why(res);
         pw.value = "";
         pw.focus();
       } finally { ok.disabled = false; }
@@ -207,7 +207,6 @@
     ["approvals", "Approvals", "/approvals", "cnt-approvals"],
     ["automation", "Automation", "/automation", null],
     ["integrations", "Integrations", "/integrations", null],
-    ["scenarios", "Scenario tests", "/scenarios", "cnt-scn", "sbx-only"],
   ];
 
   function buildShell() {
@@ -269,7 +268,6 @@
     const cnt = (id, v, hot) => { const e = txt(id, v); if (e) e.className = hot ? "cnt hot" : "cnt"; };
     cnt("cnt-cases", n(s.open_cases), s.open_cases > 0);
     cnt("cnt-approvals", n(s.pending), s.pending > 0);
-    cnt("cnt-scn", s.scenarios ? `${s.scenarios.passed}/${s.scenarios.total}` : "–", s.scenarios && s.scenarios.passed < s.scenarios.total);
     const led = s.ledger || {};
     const dot = byId("led-dot");
     if (dot) dot.className = led.ok === false ? "dot bad" : "dot ok";
@@ -1140,6 +1138,24 @@
     return "";
   }
 
+  // Alibaba regions the SLS pull may read from, and the hint shown next to a host field.
+  const REGIONS = [["ap-southeast-5", "Jakarta (ap-southeast-5)"], ["ap-southeast-1", "Singapore (ap-southeast-1)"]];
+  const SLS_TYPES = ["sls_waf", "sls_actiontrail", "sls_sas"];
+  const PLANNED = [["SL", "Slack", "Notifications"], ["MT", "Microsoft Teams", "Notifications"], ["SN", "ServiceNow", "Ticketing"]];
+  const MAP_LABEL = { rule_id: "Detection (rule ID)", severity: "Severity", detected_at: "Detected at", src_ip: "Source IP",
+    principal: "User", access_key_id: "AccessKey ID", dst_asset: "Asset", uri: "URI", ua: "User agent", events: "Event count" };
+  const INGEST = "POST /v1/ingest/webhook";
+  const isIp = h => /^\[?[0-9a-f:.]+\]?$/i.test(h) && /[0-9]/.test(h) && (h.includes(":") || /^[0-9.]+$/.test(h));
+  function hostOf(name, s) {
+    s = s || {};
+    let url = { lark: s.base_url || "https://open.larksuite.com", jira: s.site, ai: s.base_url }[name];
+    if (name === "sls" && s.endpoint && s.project) url = `https://${s.project}.${String(s.endpoint).replace(/^https:\/\//, "")}`;
+    if (!url) return "";
+    const m = /^https:\/\/([^/:?#]+)/i.exec(String(url));
+    return m ? m[1].toLowerCase() : "";
+  }
+  const hostRefused = d => /allowlist|no host is allowed|IP address is not allowed|non-public|does not resolve|only https/.test(d || "");
+
   function integrations() {
     let data = null;
     let item = null;
@@ -1153,16 +1169,47 @@
     const sel = () => decodeURIComponent(location.hash.slice(1));
     const isSource = () => item && item.category === "source";
     const fixedTarget = () => (data && data.mode === "production") || isSource();
+    const presets = () => (data && data.presets) || {};
 
     function changed() {
       dirty = true;
       byId("s-save").disabled = !writable();
       say("s-msg", "Unsaved changes.");
+      hostHint();
+    }
+
+    // The host a live target will call, checked against the broker's allowlist before anything is saved.
+    function hostHint() {
+      const box = byId("i-host");
+      const allowed = data && data.allowed_hosts ? data.allowed_hosts[item.integration] : undefined;
+      const s = draft ? draft.settings : item.settings;
+      const target = draft ? draft.target : item.target;
+      const host = hostOf(item.integration, s);
+      if (allowed === undefined || target !== "live" || (!host && item.integration !== "ai")) { box.hidden = true; return; }
+      box.hidden = false;
+      const list = allowed.length ? allowed.map(h => (h.startsWith(".") ? `*${h}` : h)).join(", ") : "none yet";
+      const ok = host && !isIp(host) && allowed.some(r => host === r || (r.startsWith(".") && host.endsWith(r) && host.length > r.length));
+      if (ok) { say("i-host", `Host ${host} is on the allowlist (${list}).`); return; }
+      const why2 = !host ? "No host is set yet." : isIp(host) ? `${host} is an IP address; use the service hostname.` : `Host ${host} is not allowed yet.`;
+      const tail = item.integration === "ai" && !allowed.length
+        ? " No AI host is allowed until the operator designates the 9router host on the broker. Saving a live AI target is refused until then."
+        : ` Allowed for ${item.label}: ${list}. The allowlist is not changed from this screen; saving this host is refused.`;
+      say("i-host", why2 + tail, true);
     }
 
     // -- the settings form, one control per schema node; obj[key] is the value it edits ------------------
     function fld(label, control, wide) {
       return el("label", { class: wide ? "fld wide" : "fld", for: control.id }, el("span", { text: label }), control);
+    }
+    function region(obj, key, label) {
+      const id = `f${++fid}`;
+      const cur = obj[key] || "";
+      const opts = REGIONS.map(([r, l]) => [`https://${r}.log.aliyuncs.com`, l]);
+      if (cur && !opts.some(o => o[0] === cur)) opts.push([cur, cur.replace(/^https:\/\//, "")]);
+      const c = el("select", { id }, cur ? null : el("option", { value: "", text: "Choose a region" }),
+        opts.map(([v, l]) => el("option", { value: v, selected: v === cur, text: l })));
+      c.addEventListener("change", () => { obj[key] = c.value; changed(); });
+      return fld("Region", c);
     }
     function node(obj, key, s0, label, optional) {
       const [s, nullable] = resolve(s0, schema);
@@ -1194,10 +1241,11 @@
       if (s.type === "array") {
         const list = Array.isArray(v) ? v : (obj[key] = []);
         const max = s.maxItems || 64;
+        const min = s.minItems || 0;
         const rows = list.map((_, i) => el("div", { class: "arr-item" }, node(list, i, s.items, `${label} ${i + 1}`),
-          el("button", { class: "btn ghost", type: "button", disabled: list.length <= (s.minItems || 0), "data-del": i, text: "Remove" })));
-        const add = el("button", { class: "btn ghost", type: "button", disabled: list.length >= max, text: `Add ${label.toLowerCase().replace(/s$/, "")}` });
-        const box = el("fieldset", { class: "fset wide" }, el("legend", { text: label }), rows, el("div", { class: "pill-row" }, add));
+          list.length > min ? el("button", { class: "btn ghost", type: "button", "data-del": i, text: "Remove" }) : null));
+        const add = list.length < max ? el("button", { class: "btn ghost", type: "button", text: `Add ${label.toLowerCase().replace(/s$/, "")}` }) : null;
+        const box = el("fieldset", { class: "fset wide" }, el("legend", { text: label }), rows, add ? el("div", { class: "pill-row" }, add) : null);
         box.addEventListener("click", e => {
           const b = e.target.closest("button");
           if (!b || b.closest("fieldset") !== box) return;
@@ -1246,8 +1294,8 @@
           return el("div", { class: "arr-item kvrow" }, name, node(o, k, s.additionalProperties, `${k} becomes`),
             el("button", { class: "btn ghost", type: "button", "data-del": k, text: "Remove" }));
         });
-        const add = el("button", { class: "btn ghost", type: "button", disabled: keys.length >= (s.maxProperties || 64), text: "Add row" });
-        const box = el("fieldset", { class: "fset wide" }, el("legend", { text: label }), rows, el("div", { class: "pill-row" }, add));
+        const add = keys.length < (s.maxProperties || 64) ? el("button", { class: "btn ghost", type: "button", text: "Add row" }) : null;
+        const box = el("fieldset", { class: "fset wide" }, el("legend", { text: label }), rows, add ? el("div", { class: "pill-row" }, add) : null);
         box.addEventListener("click", e => {
           const b = e.target.closest("button");
           if (!b || b.closest("fieldset") !== box) return;
@@ -1264,29 +1312,121 @@
       return fld(label, c, (s.maxLength || 0) > 120 || /url|template|query|site|endpoint/.test(String(key)));
     }
 
+    // Field mapping of a data source: where each alert field is found in the record, and which are tokenised.
+    function mapTable(fields, edit) {
+      const tok = new Set((data && data.tokenized) || []);
+      const keys = Object.keys(MAP_LABEL);
+      const rows = keys.map(k => {
+        const v = fields[k];
+        let cell;
+        if (edit) {
+          const c = el("input", { id: `map-${k}`, value: v || "", maxlength: 64, spellcheck: "false", autocomplete: "off",
+            placeholder: k === "rule_id" ? "required" : "not mapped", "aria-label": `${MAP_LABEL[k]}: path in the record` });
+          c.addEventListener("input", () => { fields[k] = c.value.trim() || (k === "rule_id" ? "" : null); changed(); });
+          cell = c;
+        } else cell = el("code", { class: "mono", text: v || "not mapped" });
+        return el("tr", {}, el("th", { scope: "row", text: MAP_LABEL[k] }), el("td", {}, cell),
+          el("td", {}, tok.has(k) ? el("span", { class: "tag act", text: "tokenized" }) : el("span", { class: "k", text: k === "rule_id" ? "detection" : "as sent" })));
+      });
+      return el("div", { class: "fld wide" }, el("span", { text: "Field mapping. A dotted path reads nested JSON; tokenized values are replaced before anything is stored." }),
+        el("div", { class: "table-wrap" }, el("table", { class: "tight map" },
+          el("thead", {}, el("tr", {}, el("th", { scope: "col", text: "Alert field" }), el("th", { scope: "col", text: "Path in the record" }), el("th", { scope: "col", text: "Stored" }))),
+          el("tbody", {}, rows))));
+    }
+
+    // Read-only settings (production, or writes off): every value as text, nothing to press.
+    function flat(v, path, out) {
+      if (v && typeof v === "object" && !Array.isArray(v)) { for (const k of Object.keys(v)) flat(v[k], path.concat(k), out); return out; }
+      if (Array.isArray(v) && v.some(x => x && typeof x === "object")) { v.forEach((x, i) => flat(x, path.concat(String(i + 1)), out)); return out; }
+      out.push([path.map(p => FIELD[p] || words(p)).join(" › "), Array.isArray(v) ? v.join(", ") || "–" : v === null || v === "" ? "–" : String(v)]);
+      return out;
+    }
     function drawForm() {
       fid = 0;
-      const wrap = { settings: draft.settings };
       const props = schema.properties || {};
+      const s = draft.settings || {};
+      if (!writable()) {
+        const rest = { ...s };
+        delete rest.fields;
+        const rows = flat(rest, [], []);
+        fill("i-form", el("div", { class: "form" },
+          el("dl", { class: "kv wide" }, el("dt", { text: "Enabled" }), el("dd", { text: item.version ? (item.enabled ? "Yes" : "No, kept but off") : "Not set up" }),
+            rows.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { class: "mono", text: v })])),
+          isSource() && s.fields ? mapTable(s.fields, false) : null));
+        byId("i-json-text").value = JSON.stringify(s, null, 2);
+        hostHint();
+        return;
+      }
       const enabled = el("input", { type: "checkbox", id: "f-enabled", checked: draft.enabled });
       enabled.addEventListener("change", () => { draft.enabled = enabled.checked; changed(); });
-      const f = el("fieldset", { class: "fset bare", disabled: !writable() },
+      const f = el("fieldset", { class: "fset bare" },
         el("legend", { class: "vh", text: `${item.label} settings` }),
         el("label", { class: "tg", for: "f-enabled" }, enabled, el("span", { text: "Enabled. Off keeps the settings but nothing is sent or received." })),
-        el("div", { class: "form" }, Object.keys(props).map(k => node(wrap.settings, k, props[k], FIELD[k] || words(k)))));
+        el("div", { class: "form" }, Object.keys(props).map(k => {
+          if (isSource() && k === "fields") return mapTable(s.fields || (s.fields = {}), true);
+          if (item.integration === "sls" && k === "endpoint") return region(s, k);
+          return node(s, k, props[k], FIELD[k] || words(k));
+        })));
       fill("i-form", f);
-      byId("i-json-text").value = JSON.stringify(draft.settings, null, 2);
-      byId("i-json-text").disabled = !writable();
-      byId("i-json-apply").disabled = !writable();
+      byId("i-json-text").value = JSON.stringify(s, null, 2);
+      hostHint();
+      drawSource();
     }
     function drawTarget() {
-      if (fixedTarget()) { fill("i-tgt", el("span", { class: "tag act", text: "Live" })); return; }
+      if (fixedTarget() || !writable()) { fill("i-tgt", el("span", { class: `tag ${(draft.target || item.target) === "live" ? "act" : ""}`, text: (draft.target || item.target) === "live" ? "Live" : "Mock" })); return; }
       const b = t => {
-        const x = el("button", { type: "button", "aria-pressed": draft.target === t ? "true" : "false", disabled: !writable(), text: t === "mock" ? "Mock" : "Live" });
+        const x = el("button", { type: "button", "aria-pressed": draft.target === t ? "true" : "false", text: t === "mock" ? "Mock" : "Live" });
         x.addEventListener("click", () => { draft.target = t; changed(); drawTarget(); });
         return x;
       };
       fill("i-tgt", el("span", { class: "seg", role: "group", "aria-label": "Target" }, b("mock"), b("live")));
+    }
+
+    // Connector-specific part of a data source: SLS log type, webhook ingest address, syslog listener.
+    function drawSource() {
+      const box = byId("i-src");
+      box.hidden = !isSource();
+      if (!isSource()) { fill(box); return; }
+      const s = draft.settings || {};
+      const row = (k, ...v) => [el("dt", { text: k }), el("dd", {}, ...v)];
+      if (item.integration === "sls") {
+        const types = SLS_TYPES.filter(k => presets()[k]);
+        const cur = types.find(k => presets()[k].settings.source_type === s.source_type);
+        fill(box, el("h3", { text: "Log type" }),
+          writable() ? el("div", { class: "seg wrap", role: "group", "aria-label": "Log type", id: "sls-types" },
+            types.map(k => el("button", { type: "button", "data-preset": k, "aria-pressed": k === cur ? "true" : "false", text: presets()[k].label })))
+            : el("p", { text: cur ? presets()[cur].label : s.source_type || "–" }),
+          el("p", { class: "k", text: cur ? presets()[cur].blurb : "Pick the log type to start from its field mapping. The logstore name stays yours." }),
+          el("p", { class: "banner warn", text: "Use a RAM user that can only read these logstores (log:GetLogStoreLogs). The connection test shows the key can read; it cannot show the key is read-only, so check its RAM policy before you save it." }));
+        return;
+      }
+      if (item.integration === "webhook") {
+        fill(box, el("h3", { text: "Where senders post" }), el("dl", { class: "kv" },
+          row("Ingest", el("code", { class: "mono", id: "wh-url", text: INGEST }), " ", el("button", { class: "btn ghost", type: "button", id: "wh-copy", text: "Copy" })),
+          row("Signature", el("code", { class: "mono", text: "X-HyperSoar-Signature: sha256=HMAC-SHA256(secret, timestamp.body)" })),
+          row("Timestamp", el("span", { text: `X-HyperSoar-Timestamp in unix seconds, at most ${s.max_skew_s || 300} s off; each signature is accepted once` })),
+          row("Body", el("span", { text: `One alert, a list, or {"alerts": [...]}, up to ${s.max_body_kb || 256} KB` }))),
+          el("p", { class: "note", id: "wh-msg", role: "status", "aria-live": "polite", text: "The path is on the gateway. This lab gateway has no inbound address yet, so nothing can post here until one is published." }));
+        return;
+      }
+      fill(box, el("h3", { text: "Listener" }), el("dl", { class: "kv" },
+        row("Format", "CEF over syslog"),
+        row("Port", "Opened by the gateway when its syslog port is configured. Production takes TCP with TLS only (6514); UDP 514 is sandbox only."),
+        row("Senders", `${(s.allowed_senders || []).length} network(s) allowed. Syslog has no sender login, so anything else is dropped.`)));
+    }
+    function drawHealth() {
+      const box = byId("i-hsec");
+      box.hidden = !isSource();
+      if (!isSource()) return;
+      const h = (data.health || {})[item.integration] || {};
+      const row = (k, ...v) => [el("dt", { text: k }), el("dd", {}, ...v)];
+      const s = item.settings || {};
+      fill("i-health",
+        row("Alerts, 24 h", n(h.alerts_24h)),
+        row("Last alert", h.last_alert ? `${when(h.last_alert)} ${TZL}` : "None in the last 24 hours"),
+        row("Errors, 24 h", n(item.errors_24h)),
+        row("Last test", item.last_test ? `${item.last_test.status === "pass" ? "Passed" : "Failed"} ${when(item.last_test.finished_at)} ${TZL}` : "Not tested"),
+        item.integration === "sls" && s.window_s ? row("Reading", `${s.window_s} s windows, ${s.lag_s} s behind, ${s.page} logs a page`) : null);
     }
 
     function drawState() {
@@ -1303,10 +1443,9 @@
       fill("i-secrets", names.length ? names.map(k => {
         const st = item.secrets[k];
         const label = SECRET[k] || words(k);
-        const btn = el("button", { class: "btn ghost", type: "button", "data-secret": k, disabled: !writable() || !item.version,
-          title: !item.version ? "Save the settings first: a secret is sealed for the saved host" : null, text: st.set ? "Replace" : "Set" });
+        const btn = writable() && item.version ? el("button", { class: "btn ghost", type: "button", "data-secret": k, text: st.set ? "Replace" : "Set" }) : null;
         const info = st.set ? `rotated ${when(st.rotated_at)} ${TZL} by ${st.rotated_by || "–"}${st.expires_at ? ` · expires ${String(st.expires_at).slice(0, 10)}` : ""}`
-          : st.required ? "required" : "optional";
+          : `${st.required ? "required" : "optional"}${writable() && !item.version ? " · save the settings first, a secret is sealed for the saved host" : ""}`;
         return el("div", { class: "fld" }, el("span", { text: label }),
           el("div", { class: "secret" }, el("span", { class: st.set ? "set" : "unset", text: st.set ? "Set" : "Not set" }), el("span", { class: "k", text: info }), btn));
       }) : el("p", { class: "k", text: "This integration needs no secret." }));
@@ -1316,7 +1455,7 @@
       fill("t-out", el("li", { class: t.status === "pass" ? "ok" : "bad" }, el("span", { class: "st", text: t.status === "pass" ? "PASS" : "FAIL" }),
         el("span", { text: `${fresh ? "Just now" : `Last test ${when(t.finished_at)} ${TZL}`} · version ${t.config_version} · target ${t.target || item.target}` })),
         (t.steps || []).map(x => el("li", { class: x.ok ? "ok" : "bad" }, el("span", { class: "st", text: x.ok ? "ok" : "fail" }),
-          el("span", {}, x.step, x.detail ? el("span", { class: "k", text: ` · ${x.detail}` }) : null))));
+          el("span", {}, x.step, x.detail ? el("span", { class: "k", text: ` · ${hostRefused(x.detail) ? `host not allowed yet: ${x.detail}` : x.detail}` }) : null))));
     }
     async function drawVersions() {
       const name = item.integration;
@@ -1327,7 +1466,7 @@
           x.version === item.version ? el("span", { class: "tag", text: "saved" }) : null,
           x.version === item.active_version ? el("span", { class: "tag ok", text: "active" }) : null),
         el("span", { class: "mono", text: `${when(x.changed_at)} ${TZL} · ${x.changed_by}${x.note ? ` · ${x.note}` : ""}` }),
-        x.version === item.version ? null : el("button", { class: "btn ghost", type: "button", "data-ver": x.version, disabled: !writable(), text: `Roll back to v${x.version}` })))
+        x.version === item.version || !writable() ? null : el("button", { class: "btn ghost", type: "button", "data-ver": x.version, text: `Roll back to v${x.version}` })))
         : el("li", {}, el("span", { class: "ev k", text: "No version saved yet." })));
     }
 
@@ -1353,11 +1492,15 @@
         if (switching) { say("s-msg", ""); say("t-msg", ""); say("v-msg", ""); say("i-sec-msg", ""); }
         drawForm();
         drawTarget();
+        drawSource();
       }
       drawState();
+      drawHealth();
       drawSecrets();
       if (switching || force) drawSteps(item.last_test);
-      byId("t-run").disabled = !writable() || !item.version;
+      byId("t-run").hidden = !writable() || !item.version;
+      txt("t-sub", !writable() ? "The latest test result. Tests run from the sandbox console only while settings are locked."
+        : item.version ? "Calls the saved target. A passing test makes the saved version the active one." : "Save the settings first: the test runs on the saved version.");
       if (switching || force) drawVersions().catch(e => say("v-msg", `Could not load versions (${e.message}).`, true));
     }
 
@@ -1378,6 +1521,22 @@
         return out;
       }));
     }
+    function drawCatalog() {
+      const card = (logo, name, d, btn) => el("li", {}, el("span", { class: "logo", text: logo }), el("span", { class: "nm", text: name }),
+        el("span", { class: "d", text: d }), btn);
+      const p = presets();
+      fill("cat-src", Object.keys(p).filter(k => p[k].connector === "webhook").map(k =>
+        card(p[k].label.slice(0, 2).toUpperCase(), p[k].label, p[k].blurb, el("button", { class: "btn ghost", type: "button", "data-add": k, text: "Add" }))));
+      fill("cat-ai", card("AI", "OpenAI-compatible model", "Any /v1/chat/completions endpoint on an allowed host",
+        el("button", { class: "btn ghost", type: "button", "data-add": "ai", text: "Add" })));
+      fill("cat-plan", PLANNED.map(([logo, name, d]) => card(logo, name, d, el("span", { class: "tag", text: "Planned" }))));
+    }
+    function openCatalog(open) {
+      byId("i-cat").hidden = !open;
+      byId("i-add").setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) byId("cat-close").focus();
+      else byId("i-add").focus();
+    }
 
     async function load(force) {
       data = await api("/api/integrations");
@@ -1386,17 +1545,26 @@
       drawList();
       const ro = byId("i-ro");
       ro.hidden = writable();
-      ro.textContent = !canWrite() ? "Writes are not configured on this console, so these settings are read-only."
-        : "Settings are read-only here: the broker in this mode keeps the settings write API off. Change them on the host with hypersoar integration, then test.";
+      ro.textContent = data.mode === "production"
+        ? "Locked pending security review. Production settings are shown read-only: the settings write API stays off until the security review is done."
+        : !canWrite() ? "Writes are not configured on this console, so these settings are read-only."
+        : "Settings are read-only: the settings write API is off on this install.";
       byId("i-lock").hidden = !writable();
       byId("s-bar").hidden = !writable();
+      byId("i-add").hidden = !writable();
+      byId("i-json-btn").hidden = !writable();
+      if (!writable()) {
+        byId("i-cat").hidden = true;
+        if (jsonMode) { jsonMode = false; byId("i-json").hidden = true; byId("i-form").hidden = false; }
+      } else if (!byId("cat-src").firstChild) drawCatalog();
       select(sel() || (item && item.integration), force);
     }
+    const leave = () => !dirty || confirm("Discard the unsaved changes?");
 
     byId("i-list").addEventListener("click", e => {
       const b = e.target.closest("button[data-int]");
       if (!b || (item && b.dataset.int === item.integration)) return;
-      if (dirty && !confirm("Discard the unsaved changes?")) return;
+      if (!leave()) return;
       history.replaceState(null, "", `#${b.dataset.int}`);
       select(b.dataset.int);
     });
@@ -1408,6 +1576,50 @@
       e.preventDefault();
       tabs[j].focus();
       tabs[j].click();
+    });
+    byId("i-add").addEventListener("click", () => openCatalog(byId("i-cat").hidden));
+    byId("cat-close").addEventListener("click", () => openCatalog(false));
+    byId("i-cat").addEventListener("click", e => {
+      const b = e.target.closest("button[data-add]");
+      if (!b || !writable()) return;
+      const k = b.dataset.add;
+      const into = k === "ai" ? "ai" : presets()[k].connector;
+      if ((!item || item.integration !== into || dirty) && !leave()) return;
+      history.replaceState(null, "", `#${into}`);
+      select(into, true);
+      if (k === "ai") {
+        draft.target = "live";
+        drawTarget();
+        drawForm();
+        changed();
+        say("s-msg", "Live OpenAI-compatible target drafted. Set the base URL on an allowed host and the models, save, then set the API key and test.");
+      } else {
+        draft.settings = { ...draft.settings, ...clone(presets()[k].settings) };
+        drawForm();
+        changed();
+        say("s-msg", `${presets()[k].label} field map applied to the webhook draft. Review it and save, then set the HMAC secret and run the test.`);
+      }
+      byId("i-cat").hidden = true;
+      byId("i-add").setAttribute("aria-expanded", "false");
+      byId("i-panel").scrollIntoView({ block: "start" });
+      const first = byId("i-form").querySelector("input:not([type=checkbox]), select");
+      if (first) first.focus();
+    });
+    byId("i-src").addEventListener("click", e => {
+      const p = e.target.closest("button[data-preset]");
+      if (p && writable()) {
+        const pr = presets()[p.dataset.preset];
+        draft.settings = { ...draft.settings, ...clone(pr.settings) };
+        drawForm();
+        changed();
+        say("s-msg", `${pr.label} field map applied. Check the logstore name, then save and test against the latest log.`);
+        return;
+      }
+      if (e.target.closest("#wh-copy")) {
+        const done = ok => say("wh-msg", ok ? `Copied: ${INGEST}` : "The browser did not allow copying; select the path and copy it.", !ok);
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(INGEST).then(() => done(true), () => done(false));
+        else done(false);
+      }
     });
     byId("i-json-btn").addEventListener("click", () => {
       jsonMode = !jsonMode;
@@ -1423,23 +1635,26 @@
         draft.settings = v;
         changed();
         drawForm();
+        say("s-msg", "JSON applied to the draft. Save to keep it.");
         return true;
       } catch (e) { say("s-msg", `The JSON is not valid: ${e.message}`, true); return false; }
     };
     byId("i-json-apply").addEventListener("click", applyJson);
     byId("s-discard").addEventListener("click", () => { select(item.integration, true); say("s-msg", "Changes discarded."); });
+    const refused = res => (hostRefused(why(res)) ? `This host is not allowed yet, so nothing was saved. ${why(res)}. The allowlist is not changed from this screen.` : why(res));
     byId("s-save").addEventListener("click", () => {
       if (jsonMode && !applyJson()) return;
       const name = item.integration;
+      const moved = item.version && hostOf(name, item.settings) !== hostOf(name, draft.settings) && Object.values(item.secrets || {}).some(x => x.set);
       confirmWrite({
         title: `Save ${item.label} settings`, method: "PUT", path: `/api/integrations/${encodeURIComponent(name)}`,
-        text: `Saved as a new version on target ${draft.target}${draft.enabled ? "" : ", switched off"}. It becomes active after a passing test.`,
-        reasonKey: "note", reasonMax: 200, reasonLabel: "Note (optional, kept with the version)", confirm: "Save",
+        text: `Saved as a new version on target ${draft.target}${draft.enabled ? "" : ", switched off"}. It becomes active after a passing test.${moved ? " The host changes, so the stored secrets are deleted and must be set again." : ""}`,
+        reasonKey: "note", reasonMax: 200, reasonLabel: "Note (optional, kept with the version)", confirm: "Save", fail: refused,
         body: { target: draft.target, enabled: draft.enabled, settings: draft.settings },
         done: async res => {
           dirty = false;
           await load(true);
-          say("s-msg", `Saved as version ${res.data.version}. Run the test to make it active.`);
+          say("s-msg", `Saved as version ${res.data.version}. ${moved ? "Set the secrets again for the new host, then run" : "Run"} the test to make it active.`);
         },
       });
     });
@@ -1477,69 +1692,22 @@
       const b = e.target.closest("button[data-ver]");
       if (!b) return;
       const v = Number(b.dataset.ver);
-      if (dirty && !confirm("Discard the unsaved changes?")) return;
+      if (!leave()) return;
       confirmWrite({
-        title: `Roll back ${item.label} to v${v}`, noReason: true, confirm: "Roll back",
+        title: `Roll back ${item.label} to v${v}`, noReason: true, confirm: "Roll back", fail: refused,
         path: `/api/integrations/${encodeURIComponent(item.integration)}/rollback`, body: { version: v },
-        text: `Saves the settings of v${v} again as a new version. Run the test to make it active.`,
+        text: `Saves the settings of v${v} again as a new version. Run the test to make it active. If its host differs, the stored secrets are deleted.`,
         done: async res => { dirty = false; await load(true); say("s-msg", ""); say("v-msg", `Rolled back: v${v} saved again as v${res.data.version}. Run the test to make it active.`); },
       });
     });
-    window.addEventListener("hashchange", () => { if (data && sel() !== (item && item.integration) && (!dirty || confirm("Discard the unsaved changes?"))) select(sel()); });
+    window.addEventListener("hashchange", () => { if (data && sel() !== (item && item.integration) && leave()) select(sel()); });
     window.addEventListener("beforeunload", e => { if (dirty) e.preventDefault(); });
     poll(load);
   }
 
-  // -- 06 scenario tests (sandbox only) -------------------------------------------------------------------
-  function scenarios() {
-    const RES = { pass: ["pass", "PASS"], fail: ["fail", "FAIL"], error: ["fail", "ERROR"] };
-    poll(async () => {
-      const s = await api("/api/scenarios");
-      const run = s.run;
-      const failed = run ? run.scenarios.filter(x => x.status !== "pass") : [];
-      txt("r-at", run ? hm(run.finished_at) : "–");
-      txt("r-dur", run ? `hypersoar scenario run · ${secs((ms(run.finished_at) - ms(run.started_at)) / 1000)}` : "No run recorded yet");
-      txt("r-pass", run ? n(run.passed) : "–");
-      txt("r-of", run ? `of ${plural(run.total, "scenario")}` : "–");
-      txt("r-fail", run ? n(run.total - run.passed) : "–");
-      txt("r-failt", failed.length ? clip(failed.map(x => x.id).join(", "), 40) : run ? "None failed" : "–");
-      txt("r-hist", n(s.history.length));
-      txt("r-sha", run && run.git_sha ? run.git_sha : "–");
-      fill("sc", !run ? el("tr", {}, el("td", { colspan: 5, class: "k", text: "No scenario run recorded yet. Run hypersoar scenario run in the sandbox." }))
-        : run.scenarios.flatMap(x => {
-          const [cls, label] = RES[x.status] || ["fail", x.status.toUpperCase()];
-          const names = x.checks.map(c => c.name);
-          const row = el("tr", { class: x.status === "pass" ? null : "failrow" }, el("td", { class: "mono", text: x.id }), el("td", { class: "ttl", text: x.title }),
-            el("td", { class: "k", text: names.length > 3 ? `${names.slice(0, 3).join(", ")} +${names.length - 3}` : names.join(", ") || "–" }),
-            el("td", { class: "num k", text: secs(x.ms / 1000) }), el("td", {}, el("span", { class: `res ${cls}`, text: label })));
-          if (x.status === "pass" || !x.failures.length) return [row];
-          return [row, el("tr", { class: "detail" }, el("td", { colspan: 5 }, el("div", { class: "expect" },
-            el("div", {}, el("span", { class: "k", text: "Expected" }), x.failures.map(f => el("span", { text: `${f.name}: ${f.expected}` }))),
-            el("div", {}, el("span", { class: "k", text: "Got" }), x.failures.map(f => el("span", { class: "bad", text: `${f.name}: ${f.got}` }))))))];
-        }));
-      const sd = s.seeding;
-      txt("bot-n", String(sd.per_min_10m));
-      const bs = txt("bot-st", sd.per_min_10m > 0 ? "Running" : "Idle");
-      bs.className = sd.per_min_10m > 0 ? "r tag ok" : "r tag";
-      const max = Math.max(1, ...sd.spark);
-      const step = 200 / Math.max(1, sd.spark.length - 1);
-      $("#spark path").setAttribute("d", sd.spark.length ? `M${sd.spark.map((v, i) => `${(i * step).toFixed(1)} ${(38 - (v / max) * 34).toFixed(1)}`).join("L")}` : "M0 40H200");
-      byId("spark").setAttribute("aria-label", `Seeded alerts per minute over the last hour, peak ${max}`);
-      fill("mix", sd.mix.length ? sd.mix.map(m => el("li", {}, el("span", { text: m.category }), el("span", { class: "v", text: `${m.pct}%` })))
-        : el("li", { class: "pend" }, el("span", { text: "No seeded alert in the last 24 hours" }), el("span", { class: "v", text: "–" })));
-      const gate = (cls, a, b) => el("li", { class: cls }, el("span", { text: a }), el("span", { class: "v", text: b }));
-      fill("gates",
-        gate(run && run.passed === run.total ? null : "no", "All scenarios pass", run ? `${run.passed} / ${run.total}` : "no run"),
-        gate("pend", "No synthetic rows in the production database", "preflight --production"),
-        gate("pend", "Secrets present for Lark, Jira, 9router", "preflight --production"),
-        gate("pend", "protected.yaml filled with real assets", "preflight --production"),
-        gate("pend", "Integrations reachable from production", "connection test"));
-    });
-  }
-
   // -- start ----------------------------------------------------------------------------------------------
   buildShell();
-  const SCREENS = { overview, map: threatMap, cases, approvals, automation, integrations, scenarios };
+  const SCREENS = { overview, map: threatMap, cases, approvals, automation, integrations };
   (async () => {
     try { await refreshShell(); } catch (e) { if (e instanceof LoginRequired) return; showError(`Could not load the header (${e.message}).`); }
     setInterval(() => { if (!document.hidden) refreshShell().catch(() => {}); }, POLL_MS);
